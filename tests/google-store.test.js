@@ -25,6 +25,10 @@ test("Google stores private image on shared drive without public link", async ()
   assert.equal(upload.requestBody.name, "session.webp");
   assert.equal(upload.media.mimeType, "image/webp");
 });
+test("Drive-only client initializes without credential environment variables", () => {
+  const store = new GoogleStore({ GOOGLE_DRIVE_FOLDER_ID: "folder" });
+  assert.equal(typeof store.getClients().drive.files.create, "function");
+});
 test("public or domain-shared image folders are rejected before upload", async () => {
   const f = fixture({ publicFolder: true });
   await assert.rejects(f.store.saveLead(lead, "session"));

@@ -75,18 +75,16 @@ export async function createApp({ config = readConfig(), decart, store = new Goo
       res.status(503).json({ error: "저장하지 못했어요. 입력을 유지한 채 다시 시도해 주세요." });
     }
   });
-  app.post("/session-end", async (req, res) => {
+  app.post("/session-end", (req, res) => {
     try {
-      const session = validateSession(req.body);
-      const { id, record } = sessionFor(req);
+      validateSession(req.body);
+      const { record } = sessionFor(req);
       if (record.ended) return res.sendStatus(204);
-      if (!record.endPromise) record.endPromise = store.saveSession(session, id, now());
-      try { await record.endPromise; record.ended = true; } finally { record.endPromise = null; }
+      record.ended = true;
       res.sendStatus(204);
     } catch (error) {
       if (error instanceof ValidationError) return res.status(400).json({ error: error.message });
-      logger.error("세션 기록 저장 실패");
-      res.status(503).json({ error: "세션 기록을 저장하지 못했습니다." });
+      throw error;
     }
   });
   app.get(["/lab", "/lab/"], (_req, res) => config.lab ? res.sendFile(`${publicDir}/index.html`) : res.sendStatus(404));

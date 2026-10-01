@@ -16,9 +16,9 @@
   },
   "dependencies": {
     "@decartai/sdk": "0.2.3",
+    "@googleapis/drive": "22.0.0",
     "dotenv": "^18.0.5",
-    "express": "^5.2.1",
-    "googleapis": "171.4.0"
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

@@ -236,7 +236,7 @@ STEP 09를 구현해줘.
 - 동의 없이 제출할 수 없다
 ```
 
-### STEP 10. 리드 저장 (구글 시트)
+### STEP 10. 리드 생성과 이미지 저장
 
 ```
 STEP 10을 구현해줘.
@@ -245,14 +245,13 @@ STEP 10을 구현해줘.
 - POST /leads 추가 (server.js)
   - body: name, phone, region, area, density, action(save|referral), consentAt, thirdPartyConsentAt?, image(base64 webp)
   - 필수 동의가 없으면 400
-  - 리드 정보는 구글 시트에 한 행으로 추가 (Google Sheets API, 서비스 계정, 키는 환경변수)
-  - 이미지는 구글 드라이브 비공개 폴더에 저장하고, 시트에는 파일 ID만 남긴다
-  - 시트 컬럼: createdAt, name, phone, region, area, density, action, consentAt, thirdPartyConsentAt, imageFileId
-- .env.example에 필요한 환경변수 추가, README에 시트·드라이브 준비 방법
+  - 리드 생성과 중복 제출 처리를 유지한다
+  - 이미지는 구글 드라이브 비공개 폴더에 저장한다
+- .env.example에 이미지 저장용 환경변수 추가, README에 드라이브 준비 방법
 - 클라이언트 폼 제출을 /leads로 연결, 성공 시 완료 화면
 
 완료 기준
-- 제출하면 시트에 행이 생기고, 이미지가 비공개 폴더에 저장된다
+- 제출하면 리드 생성 요청이 처리되고, 이미지가 비공개 폴더에 저장된다
 - 동의 없는 요청은 서버에서도 거절된다
 - 서비스 계정 키가 저장소에 없다
 ```
@@ -267,13 +266,11 @@ STEP 11을 구현해줘.
 - 하루 전체 발급 상한 (환경변수, 넘으면 503과 "잠시 후 다시" 화면)
 - 세션 종료 시 navigator.sendBeacon으로 POST /session-end 전송
   { reason, billedSeconds, wallSeconds, switches, combo, captured }
-- /session-end 내용을 구글 시트의 별도 탭(sessions)에 한 행으로 기록
-- 시트 탭 sessions에서 하루 합계 billedSeconds × 0.02를 계산하는 수식 셀 하나
+- /session-end의 입력 검증과 중복 종료 처리를 유지한다
 
 완료 기준
 - 같은 IP로 4번째 연결 시도가 거절된다
-- 탭을 닫아도 sessions 탭에 기록이 남는다
-- 리드 1건당 모델 비용을 시트에서 바로 볼 수 있다
+- 탭을 닫으면 종료 요청이 서버에 전달된다
 ```
 
 ---

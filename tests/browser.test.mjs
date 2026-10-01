@@ -50,9 +50,15 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   let issued = 0;
   const app = await createApp({ config, logger: { error() {} },
     decart: { tokens: { create: async () => { issued++; return { apiKey: "test-client-token" }; } } },
-    store: { saveLead: async (lead) => { leads.push(lead); return { imageFileId: "test-file" }; }, saveSession: async (session) => sessions.push(session) },
+    store: { saveLead: async (lead) => { leads.push(lead); return { imageFileId: "test-file" }; } },
   });
   const server = await new Promise((resolve, reject) => { const s = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve(s)); s.on("error", reject); });
+  // Observe successful beacon requests without an external session storage service.
+  server.on("request", (request, response) => {
+    if (request.url === "/session-end") response.once("finish", () => {
+      if (response.statusCode === 204) sessions.push(request.body);
+    });
+  });
   const base = `http://127.0.0.1:${server.address().port}`;
   config.origin = base;
   t.after(() => new Promise((resolve) => server.close(resolve)));

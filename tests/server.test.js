@@ -13,18 +13,17 @@ const quiet = { error() {} };
 async function fixture(t, options = {}) {
   let creates = 0;
   const leads = [];
-  const sessions = [];
   const scopes = [];
   const config = readConfig({ APP_ORIGIN: "http://localhost:3000", ...options.env });
   const app = await createApp({ config, now: () => clock, logger: quiet,
     decart: options.decart || { tokens: { create: async (input) => { creates++; scopes.push(input); return { apiKey: "temporary-client-token" }; } } },
-    store: options.store || { saveLead: async (lead, id) => { leads.push({ lead, id }); return { imageFileId: "private-file" }; }, saveSession: async (value, id) => sessions.push({ value, id }) },
+    store: options.store || { saveLead: async (lead, id) => { leads.push({ lead, id }); return { imageFileId: "private-file" }; } },
   });
   const server = await new Promise((resolve, reject) => { const s = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve(s)); s.on("error", reject); });
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
   const post = (path, body, headers = {}) => fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: body && JSON.stringify(body) });
-  return { base, post, leads, sessions, scopes, creates: () => creates };
+  return { base, post, leads, scopes, creates: () => creates };
 }
 async function validLead(sessionId) {
   const image = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#888" } }).webp().toBuffer();
@@ -103,7 +102,7 @@ test("beacon text/plain body accepted; duplicate and invalid reports handled", a
   assert.equal((await f.post("/session-end", { ...body, billedSeconds: -1 })).status, 400);
   assert.equal((await f.post("/session-end", body, { "Content-Type": "text/plain" })).status, 204);
   assert.equal((await f.post("/session-end", body)).status, 204);
-  assert.equal(f.sessions.length, 1);
+  assert.equal((await f.post("/session-end", { ...body, sessionId: "unknown" })).status, 400);
 });
 test("CLI entry point starts the app and serves the page without configured keys", { timeout: 10000 }, async (t) => {
   const portFinder = createServer();

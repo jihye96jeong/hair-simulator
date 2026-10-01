@@ -1,6 +1,6 @@
 # 모수 — 실시간 헤어라인 시뮬레이터
 
-`moisu-simulator-steps.md` STEP 01~11과 `prd-hair-simulator.md`를 반영한 Node 20.9+ / Express / 바닐라 HTML·JS 앱입니다. 앱 빌드 과정이나 CDN 없이 설치된 Decart SDK 0.2.3을 네이티브 ES 모듈로 제공합니다. Google API 라이브러리도 Node 20을 지원하는 171 버전으로 고정했습니다. 기존 Python 예제는 그대로 두었으며 시뮬레이터 실행에는 사용하지 않습니다.
+`moisu-simulator-steps.md` STEP 01~11과 `prd-hair-simulator.md`를 반영한 Node 20.9+ / Express / 바닐라 HTML·JS 앱입니다. 앱 빌드 과정이나 CDN 없이 설치된 Decart SDK 0.2.3을 네이티브 ES 모듈로 제공합니다. 이미지 저장은 Node 20을 지원하는 Drive 전용 패키지 `@googleapis/drive` 22를 사용합니다. 기존 Python 예제는 그대로 두었으며 시뮬레이터 실행에는 사용하지 않습니다.
 
 ## 실행
 
@@ -80,6 +80,7 @@ const queryParams = { self_anchor: "false" };
 - 클라이언트: tick 누적 120초 종료, SDK 연결 시작부터 125초 보조 타이머, `visibilitychange`/`pagehide` 종료, 중복 disconnect·종료 로그 방지.
 - 현재 SDK connect에는 AbortSignal이 없습니다. 연결 완료 전에 떠나면 카메라는 즉시 중지하고 늦게 반환되는 SDK 연결을 즉시 disconnect합니다. 대기 구간에도 서버 세션 상한이 적용됩니다.
 - 종료 기록은 `navigator.sendBeacon`으로 보내고 큐 등록 실패 시 `fetch(..., {keepalive:true})`로 재시도합니다. 실제 Chrome 탭 닫기 전송을 확인했지만 오프라인·브라우저 강제 종료에서는 전송을 보장하지 않습니다.
+- `/session-end`는 입력 검증과 중복 종료 처리를 유지하며 외부 저장소에는 전송하지 않습니다.
 - 횟수와 중복 저장 상태는 단일 서버 메모리 기준입니다. 재시작 시 초기화되고 여러 인스턴스가 카운터를 공유하지 않습니다. 토큰 발급 제한은 SDK 토큰을 일회용으로 만들지는 않습니다.
 - Google Drive 저장 실패 시 폼을 유지합니다. 동일 sessionId로 재시도하면 진행 중인 업로드를 재사용합니다.
 
