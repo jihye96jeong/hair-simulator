@@ -22,7 +22,7 @@ h2 { font-size: 14px; margin: 0; font-weight: 600; }
 .notice { margin: 0 0 16px; padding: 12px 14px; border: 1px solid #ecc4bf; border-radius: 6px; font-size: 13px; line-height: 1.6; }
 .error { color: #922f26; background: #fff2ef; }
 .area-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.area-buttons small { font-size: 10px; margin-left: 4px; font-weight: 400; }
+#experience .area-buttons { margin-top: 16px; }
 .combo-buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 14px 0; }
 .settings-row .combo-buttons { margin: 0; }
 .combo-buttons button { padding: 12px 6px; }
@@ -45,6 +45,7 @@ button.selected { background: #eef2f7; color: #27364b; border-color: #667b99; }
 .bottom { bottom: 10px; left: 10px; }
 .resolution { position: absolute; bottom: 14px; right: 10px; font-size: 10px; color: #fff; text-shadow: 0 1px 2px #000; }
 .face-guide { position: absolute; width: 60%; height: 66%; left: 20%; top: 10%; border: 2px dashed rgb(255 255 255 / 85%); border-radius: 48% 48% 44% 44%; box-shadow: 0 0 0 200px rgb(0 0 0 / 12%); }
+.face-guide.crown { height: 40%; top: 20%; border-radius: 50%; }
 .experience-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .experience-heading h1 { margin: 0; }
 #remaining { font-size: 12px; font-variant-numeric: tabular-nums; color: #646b77; white-space: nowrap; }

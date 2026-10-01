@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f5f6f8">
-  <title>모수 | 헤어라인 시뮬레이터</title>
+  <title>모수 | 헤어 시뮬레이터</title>
   <link rel="stylesheet" href="/styles.css">
   <script type="importmap">
   { "imports": {
@@ -25,7 +25,7 @@
     <p id="error" class="notice error" role="alert" hidden></p>
     <section id="selection" class="screen" aria-labelledby="selection-title">
       <h1 id="selection-title">시뮬레이션 설정</h1>
-      <div class="settings-row"><h2>부위</h2><div class="area-buttons"><button class="selected" aria-pressed="true">헤어라인</button><button disabled>정수리 <small>미지원</small></button></div></div>
+      <div class="settings-row"><h2>부위</h2><div class="area-buttons" data-areas role="group" aria-label="부위"></div></div>
       <div class="settings-row"><h2>모수</h2><div class="combo-buttons" data-combos></div></div>
       <dl class="session-details"><div><dt>연결 시간</dt><dd>최대 120초</dd></div><div><dt>입력</dt><dd>전면 카메라</dd></div></dl>
       <p class="small">모수는 비교 조건입니다. 예상 이미지는 수술 결과를 보장하지 않습니다.</p>
@@ -33,8 +33,8 @@
     </section>
 
     <section id="preparation" class="screen" hidden aria-labelledby="preparation-title">
-      <h1 id="preparation-title">카메라 준비</h1><p class="small">정면 촬영 · 얼굴과 이마를 가이드 안에 배치</p>
-      <div class="video-stage preview-stage"><video id="preview" autoplay muted playsinline></video><div class="face-guide" aria-hidden="true"></div><span class="video-chip bottom">카메라 미리보기</span></div>
+      <h1 id="preparation-title">카메라 준비</h1><p id="preparation-guidance" class="small">정면 촬영 · 얼굴과 이마를 가이드 안에 배치</p>
+      <div class="video-stage preview-stage"><video id="preview" autoplay muted playsinline></video><div id="camera-guide" class="face-guide" aria-hidden="true"></div><span id="preview-label" class="video-chip bottom">헤어라인 · 부분</span></div>
       <p id="camera-message" class="small" role="status">카메라 권한 요청 중</p>
       <button id="experience-start" class="primary" disabled>연결 시작</button><button class="text-button" data-back>설정으로 돌아가기</button>
     </section>
@@ -42,7 +42,9 @@
     <section id="experience" class="screen" hidden aria-labelledby="experience-title">
       <div class="experience-heading"><h1 id="experience-title">실시간 시뮬레이션</h1><span id="remaining" role="timer">120초 남음</span></div>
       <progress id="time-bar" max="120" value="120" aria-label="남은 연결 시간"></progress>
+      <p id="experience-guidance" class="small">정면 촬영 · 얼굴과 이마를 카메라에 노출</p>
       <div class="video-stage"><video id="output" autoplay muted playsinline></video><span id="combo-label" class="video-chip top-left">헤어라인 · 부분</span><span id="connection-state" class="video-chip top-right" role="status">연결 준비</span><span class="video-chip bottom">예상 이미지</span><span id="resolution" class="resolution"></span></div>
+      <div class="area-buttons" data-areas role="group" aria-label="부위"></div>
       <div class="combo-buttons" data-combos></div>
       <p class="small center">예상 이미지이며 수술 결과를 보장하지 않습니다.</p>
       <div id="product-actions" class="action-grid"><button id="save-result" class="primary" disabled>결과 저장</button><button id="referral" class="secondary" disabled>병원 소개 요청</button></div>
@@ -52,7 +54,7 @@
 
     <section id="contact" class="screen" hidden aria-labelledby="contact-title">
       <h1 id="contact-title">결과 저장</h1>
-      <div class="video-stage captured-stage"><img id="captured-image" alt="선택한 헤어라인의 예상 이미지"><span id="captured-label" class="video-chip top-left"></span><span class="video-chip bottom">예상 이미지</span></div>
+      <div class="video-stage captured-stage"><img id="captured-image" alt="선택한 부위의 예상 이미지"><span id="captured-label" class="video-chip top-left"></span><span class="video-chip bottom">예상 이미지</span></div>
       <p class="small">캡처 완료 · 카메라 및 실시간 연결 종료</p>
       <form id="lead-form">
         <label for="name">이름<input id="name" name="name" autocomplete="name" maxlength="50" required></label>
@@ -66,7 +68,7 @@
     </section>
 
     <section id="ended" class="screen" hidden aria-labelledby="ended-title"><h1 id="ended-title">시간 종료</h1><p id="ended-message" class="small"></p><button id="retry" class="primary">설정으로 돌아가기</button></section>
-    <section id="complete" class="screen" hidden aria-labelledby="complete-title"><h1 id="complete-title">저장 완료</h1><p id="complete-message" class="small"></p><div id="saved-stage" class="video-stage"><img id="saved-image" alt="저장한 헤어라인 예상 이미지"></div><button id="download-saved" class="primary">PNG 다운로드</button><button class="text-button" data-back>설정으로 돌아가기</button></section>
+    <section id="complete" class="screen" hidden aria-labelledby="complete-title"><h1 id="complete-title">저장 완료</h1><p id="complete-message" class="small"></p><div id="saved-stage" class="video-stage"><img id="saved-image" alt="저장한 예상 이미지"></div><button id="download-saved" class="primary">PNG 다운로드</button><button class="text-button" data-back>설정으로 돌아가기</button></section>
   </main>
 </body>
 </html>

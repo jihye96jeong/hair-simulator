@@ -1,5 +1,10 @@
 import { CAP_SECONDS } from "./shared.js";
 
+/**
+ * Decart lucy-2.5 realtime session lifecycle.
+ * Hair preset changes use rt.set() on the same connection (no reconnect).
+ * Rapid select() calls drain to the latest pending preset.
+ */
 export class RealtimeSession {
   constructor({ mode, anchor, combo, onState = () => {}, onTick = () => {}, onStop = () => {}, onRemote = () => {}, onError = () => {}, report = () => {}, now = () => performance.now(), timers = globalThis, logger = console }) {
     Object.assign(this, { mode, anchor, combo, onState, onTick, onStop, onRemote, onError, report, now, timers, logger });
@@ -13,7 +18,11 @@ export class RealtimeSession {
     this.startedAt = null;
     this.sessionId = null;
     this.reported = false;
+    this.setting = false;
+    this.desired = null;
+    this.settingPromise = null;
   }
+
   async start(stream, tokenRequest, connect, options) {
     this.stream = stream;
     try {
@@ -43,13 +52,16 @@ export class RealtimeSession {
       this.stop("error");
     }
   }
+
   wallSeconds() { return this.startedAt === null ? 0 : Math.max(0, (this.now() - this.startedAt) / 1000); }
+
   connectionChange(state) {
     if (this.stopped) return;
     this.state = state;
     this.onState(state);
     if (state === "disconnected") this.stop("disconnected");
   }
+
   tick(seconds) {
     if (this.stopped || !Number.isFinite(seconds) || seconds < 0) return;
     // Preserve total usage if the provider's tick counter resets on reconnect.
@@ -63,22 +75,54 @@ export class RealtimeSession {
     this.onTick(this.billedSeconds, this.wallSeconds());
     if (this.billedSeconds >= CAP_SECONDS) this.stop("cap");
   }
+
+  /** Apply hair reference on the live session. Rapid calls share one drain; latest key wins. */
   async select(key, state) {
-    if (this.stopped || !this.rt || !["connected", "generating"].includes(this.state) || this.setting) return false;
-    if (key === this.combo) return true;
+    if (this.stopped || !this.rt || !["connected", "generating"].includes(this.state)) return false;
+    this.desired = { key, state };
+    if (this.settingPromise) return this.settingPromise;
     this.setting = true;
-    try {
-      await this.rt.set(state);
-      if (this.stopped) return false;
-      this.combo = key;
-      this.switches++;
-      return true;
-    } finally { this.setting = false; }
+    this.settingPromise = (async () => {
+      try {
+        while (this.desired && !this.stopped) {
+          const next = this.desired;
+          this.desired = null;
+          if (next.key === this.combo) continue;
+          await this.rt.set(next.state);
+          if (this.stopped) return false;
+          if (this.desired) continue;
+          this.combo = next.key;
+          this.switches++;
+        }
+        return !this.stopped;
+      } catch (error) {
+        this.desired = null;
+        throw error;
+      } finally {
+        this.setting = false;
+        this.settingPromise = null;
+      }
+    })();
+    return this.settingPromise;
   }
+
+  /** Same-session hair reference update (HairSessionHandle.setHairReference). */
+  async setHairReference(image, prompt) {
+    return this.select(this.combo, { prompt, image, enhance: true });
+  }
+
+  async clearHairReference() {
+    if (this.stopped || !this.rt) return;
+    await this.rt.set({ image: null });
+  }
+
+  disconnect() { this.stop("manual"); }
+
   stop(reason, captured = this.captured) {
     if (this.stopped) return;
     this.stopped = true;
     this.captured = captured;
+    this.desired = null;
     this.timers.clearTimeout(this.fallback);
     this.timers.clearInterval(this.clock);
     const rt = this.rt;
@@ -91,6 +135,7 @@ export class RealtimeSession {
     this.sendReport();
     this.onStop(this.summary);
   }
+
   sendReport() {
     if (this.reported || !this.sessionId || !this.summary) return;
     this.reported = true;

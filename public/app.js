@@ -1,6 +1,7 @@
 import { COMBOS, stateOf, initialStateOf } from "./combos.js";
-import { CAP_SECONDS, REGIONS, validPhone, normalizePhone } from "./shared.js";
+import { AREAS, CAP_SECONDS, REGIONS, validPhone, normalizePhone } from "./shared.js";
 import { RealtimeSession } from "./session.js";
+import { openFrontCamera, stopMediaStream } from "./camera.js";
 import { captureFrame, downloadCapture } from "./capture.js";
 
 const $ = (id) => document.getElementById(id);
@@ -46,20 +47,40 @@ function show(next) {
 }
 function stopCamera() {
   cameraEpoch++;
-  for (const track of camera?.getTracks() || []) track.stop();
+  stopMediaStream(camera);
   camera = null;
   $("preview").srcObject = null;
 }
-function usable(key) { return mode === "text" || (Boolean(images[key]) && (lab || config?.assets?.[key])); }
+function usable(key) { return Boolean(COMBOS[key]) && (mode === "text" || (Boolean(images[key]) && (lab || config?.assets?.[key]))); }
+function areaKeys(area) { return Object.keys(COMBOS).filter((key) => COMBOS[key].area === area); }
+function applyCombo(key) {
+  if (COMBOS[key].area !== COMBOS[combo].area) $("pose").value = COMBOS[key].area === "crown" ? "숙임" : "정면";
+  combo = key;
+  updateButtons();
+}
 function updateButtons() {
   const live = !session?.stopped && Boolean(session?.rt) && ["connected", "generating"].includes(session?.state);
   const frame = live && $("output").readyState >= 2 && $("output").videoWidth > 0;
+  const area = COMBOS[combo].area;
+  // Keep area/density clickable while a set() is in flight so the latest choice wins.
+  const busy = connecting || (screen === "experience" && !live);
+  for (const button of document.querySelectorAll("[data-area]")) {
+    button.classList.toggle("selected", button.dataset.area === area);
+    button.setAttribute("aria-pressed", String(button.dataset.area === area));
+    button.disabled = !config || !areaKeys(button.dataset.area).some(usable) || busy;
+  }
   for (const button of document.querySelectorAll("[data-combo]")) {
     const key = button.dataset.combo;
+    button.hidden = COMBOS[key].area !== area;
     button.classList.toggle("selected", key === combo);
     button.setAttribute("aria-pressed", String(key === combo));
-    button.disabled = !usable(key) || (screen === "experience" && (!live || switching || connecting));
+    button.disabled = !usable(key) || busy;
   }
+  const crown = area === "crown";
+  $("preparation-guidance").textContent = crown ? "고개를 숙여 정수리를 가이드 안에 배치" : "정면 촬영 · 얼굴과 이마를 가이드 안에 배치";
+  $("experience-guidance").textContent = crown ? "고개를 숙여 정수리를 카메라에 노출" : "정면 촬영 · 얼굴과 이마를 카메라에 노출";
+  $("camera-guide").classList.toggle("crown", crown);
+  $("preview-label").textContent = COMBOS[combo].label;
   $("prepare").disabled = !config || !usable(combo) || connecting;
   $("experience-start").disabled = !camera || connecting || !usable(combo);
   for (const id of ["save-result", "referral", "lab-capture"]) $(id).disabled = !frame || switching || connecting;
@@ -93,10 +114,10 @@ async function prepareCamera() {
   const epoch = ++cameraEpoch;
   $("camera-message").textContent = "카메라 권한 요청 중";
   try {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error("카메라 사용에 HTTPS 연결이 필요합니다.");
-    const portrait = matchMedia("(orientation: portrait)").matches;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: portrait ? { facingMode: "user" } : { facingMode: "user", width: 1280, height: 720 } });
-    if (epoch !== cameraEpoch || document.hidden || screen !== "preparation") { stream.getTracks().forEach((track) => track.stop()); return; }
+    const sdk = await import("@decartai/sdk");
+    const model = sdk.models.realtime("lucy-2.5");
+    const stream = await openFrontCamera(model);
+    if (epoch !== cameraEpoch || document.hidden || screen !== "preparation") { stopMediaStream(stream); return; }
     camera = stream;
     $("preview").srcObject = stream;
     await $("preview").play();
@@ -105,7 +126,10 @@ async function prepareCamera() {
   } catch (cause) {
     if (epoch !== cameraEpoch) return;
     stopCamera();
-    const message = cause.name === "NotAllowedError" ? "카메라 권한이 거부되었습니다. 접근 허용 후 재시도하십시오." : cause.name === "NotFoundError" ? "사용 가능한 카메라가 없습니다." : "카메라 초기화 실패. 권한 및 HTTPS 연결을 확인하십시오.";
+    const message = cause.code === "camera-unsupported" ? "이 브라우저는 카메라를 지원하지 않습니다. HTTPS로 접속해 주세요."
+      : cause.code === "camera-denied" ? "카메라 권한이 거부되었습니다. 접근 허용 후 재시도하십시오."
+        : cause.code === "camera-missing" ? "사용 가능한 카메라가 없습니다."
+          : "카메라 초기화 실패. 권한 및 HTTPS 연결을 확인하십시오.";
     $("camera-message").textContent = message;
     error(message);
     updateButtons();
@@ -156,8 +180,9 @@ async function startExperience() {
       initialState: initialStateOf(combo, mode, images),
       ...(anchor === "off" ? { queryParams: { self_anchor: "false" } } : {}),
     });
-  } catch {
-    error("연결 초기화 실패. 잠시 후 재시도하십시오.");
+  } catch (cause) {
+    console.error(cause);
+    error(cause?.publicMessage || "Decart 연결에 실패했어요. 잠시 후 재시도해 주세요.");
     active.stop("error");
   } finally {
     connecting = false;
@@ -165,18 +190,29 @@ async function startExperience() {
   }
 }
 async function selectCombo(key) {
-  if (!usable(key) || switching || connecting) return;
-  if (screen !== "experience") { combo = key; updateButtons(); return; }
+  if (!usable(key) || connecting) return;
+  const previous = combo;
+  applyCombo(key);
+  if (screen !== "experience" || !session || session.stopped) return;
   switching = true;
   updateButtons();
   try {
-    if (await session.select(key, stateOf(key, mode, images))) {
-      combo = key;
-      $("combo-label").textContent = COMBOS[combo].label;
-    }
-  } catch {
-    error("모수 변경 실패. 연결 상태를 확인하십시오.");
+    await session.select(key, stateOf(key, mode, images));
+    if (session.stopped) return;
+    applyCombo(session.combo);
+    $("combo-label").textContent = COMBOS[combo].label;
+    error("");
+  } catch (cause) {
+    console.error(cause);
+    applyCombo(session?.stopped ? previous : (session?.combo || previous));
+    $("combo-label").textContent = COMBOS[combo].label;
+    error("헤어 참고 이미지 변경에 실패했어요. 연결 상태를 확인하십시오.");
   } finally { switching = false; updateButtons(); }
+}
+function selectArea(area) {
+  const keys = areaKeys(area).filter(usable);
+  const key = keys.find((key) => COMBOS[key].density === COMBOS[combo].density) || keys[0];
+  if (key) return selectCombo(key);
 }
 function openForm(nextAction) {
   try {
@@ -190,6 +226,7 @@ function openForm(nextAction) {
     $("captured-image").src = canvas.toDataURL("image/webp", .85);
     $("captured-image").parentElement.style.aspectRatio = `${canvas.width} / ${canvas.height}`;
     $("captured-label").textContent = COMBOS[captureCombo].label;
+    $("captured-image").alt = `${COMBOS[captureCombo].label} 예상 이미지`;
     $("contact-title").textContent = action === "referral" ? "병원 소개 요청" : "결과 저장";
     $("submit-lead").textContent = action === "referral" ? "병원 소개 요청" : "결과 저장";
     $("third-party").hidden = action !== "referral";
@@ -215,7 +252,7 @@ async function submitLead(event) {
   try {
     const payload = {
       name: $("name").value.trim(), phone: normalizePhone($("phone").value), region: $("region").value,
-      area: "hairline", density: captureCombo, action, consentAt,
+      area: COMBOS[captureCombo].area, density: COMBOS[captureCombo].density, action, consentAt,
       ...(action === "referral" ? { thirdPartyConsentAt } : {}),
       image: captureCanvas.toDataURL("image/webp", .85), sessionId: captureSessionId,
     };
@@ -225,6 +262,7 @@ async function submitLead(event) {
     $("complete-title").textContent = action === "referral" ? "소개 요청 접수 완료" : "저장 완료";
     $("complete-message").textContent = action === "referral" ? "병원 소개 요청 제출 완료 · PNG 다운로드 가능" : "이미지 저장 완료 · PNG 다운로드 가능";
     $("saved-image").src = $("captured-image").src;
+    $("saved-image").alt = $("captured-image").alt;
     $("saved-stage").style.aspectRatio = `${captureCanvas.width} / ${captureCanvas.height}`;
     show("complete");
   } catch (cause) { error(cause.message || "저장 실패. 재시도하십시오.", "form-error"); }
@@ -238,14 +276,24 @@ function reset() {
   show("selection");
 }
 
+for (const container of document.querySelectorAll("[data-areas]")) {
+  for (const area of AREAS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.area = area;
+    button.textContent = area === "crown" ? "정수리" : "헤어라인";
+    button.addEventListener("click", () => selectArea(area));
+    container.append(button);
+  }
+}
 for (const container of document.querySelectorAll("[data-combos]")) {
-  for (const [key] of Object.entries(COMBOS)) {
+  for (const [key, value] of Object.entries(COMBOS)) {
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.combo = key;
-    button.textContent = { partial: "부분", "1k": "1천 모", "2k": "2천 모" }[key];
+    button.textContent = { partial: "부분", "1k": "1천 모", "2k": "2천 모" }[value.density];
     const description = document.createElement("small");
-    description.textContent = { partial: "양쪽 모서리", "1k": "헤어라인 채우기", "2k": "앞머리 전체" }[key];
+    description.textContent = (value.area === "crown" ? { partial: "중앙 희박 부위", "1k": "정수리 중심", "2k": "정수리 전체" } : { partial: "양쪽 모서리", "1k": "헤어라인 채우기", "2k": "앞머리 전체" })[value.density];
     button.append(description);
     button.addEventListener("click", () => selectCombo(key));
     container.append(button);
@@ -271,7 +319,7 @@ $("lead-form").addEventListener("input", updateForm);
 $("lead-form").addEventListener("submit", submitLead);
 $("consent").addEventListener("change", () => { consentAt = $("consent").checked ? new Date().toISOString() : null; updateForm(); });
 $("third-consent").addEventListener("change", () => { thirdPartyConsentAt = $("third-consent").checked ? new Date().toISOString() : null; updateForm(); });
-$("download-saved").addEventListener("click", () => captureCanvas && downloadCapture(captureCanvas, { mode, anchor, combo: captureCombo, pose: "정면" }));
+$("download-saved").addEventListener("click", () => captureCanvas && downloadCapture(captureCanvas, { mode, anchor, combo: captureCombo, pose: COMBOS[captureCombo].area === "crown" ? "숙임" : "정면" }));
 for (const event of ["loadeddata", "resize", "playing"]) $("output").addEventListener(event, updateResolution);
 $("output").addEventListener("click", () => $("output").play().catch(() => {}));
 document.addEventListener("visibilitychange", () => {
@@ -304,8 +352,8 @@ async function initialize() {
       } catch { /* unavailable references are disabled; text mode remains usable */ }
     }));
     if (!usable(combo)) {
-      combo = Object.keys(COMBOS).find(usable) || "partial";
-      error("참고 이미지 미등록. 이미지 등록 후 연결할 수 있습니다.");
+      applyCombo(Object.keys(COMBOS).find(usable) || "partial");
+      if (!usable(combo)) error("참고 이미지 미등록. 이미지 등록 후 연결할 수 있습니다.");
     }
     if (mode === "ref" && !images[combo]) error("참고 이미지 로드 실패. 새로고침 후 재시도하십시오.");
     if (lab && mode === "ref" && !config.assets[combo]) error("현재 회색 플레이스홀더입니다. 실제 머리 참고 이미지로 교체한 뒤 얼굴·모수 차이를 검증하세요.");

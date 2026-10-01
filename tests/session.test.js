@@ -79,6 +79,30 @@ test("switches share the connection; capture closes it immediately", async () =>
   assert.equal(f.reports[0].captured, true);
   assert.equal(f.reports[0].combo, "1k");
 });
+test("rapid select drains to the latest preset without reconnect", async () => {
+  const f = fixture();
+  let active = 0;
+  const order = [];
+  f.rt.set = async (value) => {
+    active++;
+    order.push(`start:${value.prompt}`);
+    f.sets.push(value);
+    await Promise.resolve();
+    order.push(`end:${value.prompt}`);
+    active--;
+  };
+  await f.session.start(f.stream, token, async () => f.rt, {});
+  const first = f.session.select("1k", { prompt: "1k", enhance: true });
+  const second = f.session.select("2k", { prompt: "2k", enhance: true });
+  assert.equal(await first, true);
+  assert.equal(await second, true);
+  assert.equal(f.session.combo, "2k");
+  assert.deepEqual(f.sets.map((item) => item.prompt), ["1k", "2k"]);
+  assert.ok(f.session.switches >= 1);
+  assert.equal(active, 0);
+  assert.equal(f.counts().disconnects, 0);
+  f.session.stop("manual");
+});
 test("hiding during token issuance prevents a late connection and reports once", async () => {
   const f = fixture();
   let resolveToken;

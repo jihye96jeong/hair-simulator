@@ -1,6 +1,8 @@
 # 구현 및 검증 기록
 
-기준 문서: `moisu-simulator-steps.md`, `prd-hair-simulator.md`. 전체 구현 요청에 따라 STEP 01~11을 구현했습니다. STEP 07은 자동 판정하지 않았습니다. PRD의 6개 조합 구상 중 정수리는 단계 문서의 명시적 이후 범위에 맞춰 준비 중으로 남겼습니다. 배포·실제 병원 전달·보관 기간 자동 삭제는 수행하지 않았습니다.
+기준 문서: `moisu-simulator-steps.md`, `prd-hair-simulator.md`. 전체 구현 요청에 따라 STEP 01~11을 구현했습니다. STEP 07은 자동 판정하지 않았습니다. 정수리 추가 요청을 반영해 PRD의 헤어라인·정수리 6개 조합을 구현했습니다. 배포·실제 병원 전달·보관 기간 자동 삭제는 수행하지 않았습니다.
+
+참고 클론 `change_ai/`(요청문의 `change_ai-main`에 해당, 수정하지 않음)의 카메라·토큰·세션 패턴을 STEP 01 범위에 맞춰 현재 스택에 재정렬했습니다. 카메라 ideal은 `models.realtime("lucy-2.5")` width/height/fps, 토큰 `expiresIn: 300`, 같은 연결에서 `set()` 전환(빠른 클릭은 최신 선택 유지)입니다.
 
 ## 구현 파일
 
@@ -10,7 +12,7 @@
 | `server.js`, `lib/config.js`, `lib/quota.js` | 정적 앱, 토큰, 일별 발급 상한, 리드·세션 API |
 | `lib/google-store.js`, `lib/validation.js` | 비공개 Drive 이미지 저장, 동의·입력 검증 |
 | `lib/browser-vendor.js` | SDK·의존성을 CDN·빌드 없이 제공 |
-| `lib/assets.js`, `scripts/create-placeholders.js`, `public/assets/*` | 회색 WebP 3장·예비 이미지, 실제 에셋 감지 |
+| `lib/assets.js`, `scripts/create-placeholders.js`, `public/assets/*` | 헤어라인·정수리 PNG 원본 6장, 예비 이미지 생성, 실제 에셋 감지 |
 | `public/index.html`, `styles.css`, `app.js` | 모바일 사용자 흐름, `/lab` 검증 흐름 |
 | `public/combos.js`, `shared.js`, `session.js`, `capture.js` | 전체 상태 전환, 세션 종료·시간 제한, 캡처 |
 | `scripts/check-prompts.js`, `scripts/setup-google.js` | 프롬프트 검사, Drive 폴더 확인 |
@@ -22,14 +24,14 @@
 | STEP | 자동·로컬 확인 | 실제 환경에서 남은 확인 |
 | --- | --- | --- |
 | 01 | HTTP 화면·SDK 제공, 토큰 응답 구조·실패 500·키 비노출 | 실제 DECART_API_KEY로 토큰 발급 |
-| 02 | WebP 1280×720, 프롬프트 302/294/300자, 모듈 import | 얼굴 없는 머리 참고 이미지 3장 교체 |
-| 03 | SDK 타입, 중첩 initialState, 동일 연결 set 전환, reconnecting 비활성화, ref/text·anchor, track 종료 | 실제 첫 프레임·얼굴 유지·전환 결과 |
+| 02 | PNG 1254×1254 원본 6장 연결, 모든 프롬프트 750자 이하, 모듈 import | 참고 이미지에 포함된 얼굴 부위가 출력 얼굴에 영향을 주는지 실제 연결 검증 |
+| 03 | SDK 타입, 중첩 initialState, 동일 연결에서 부위·모수 전환, 전환 실패 시 선택 유지, 이미지 누락 시 비활성화, ref/text·anchor, track 종료 | 실제 첫 프레임·얼굴 유지·정수리 및 모수 전환 결과 |
 | 04 | tick 120초·보조 125초 종료, hidden/pagehide, 중복 로그·disconnect 방지, tick 재설정 누적 | Decart 실제 재연결 tick 규칙을 콘솔 로그로 기록 |
 | 05 | PNG 조건 파일명, 예상 이미지·조합 라벨 삽입, lab 캡처 후 연결 유지. 빨강 좌·파랑 우 출력과 저장 픽셀 방향 일치 | 실제 전면 카메라 mirror:auto 방향 |
 | 06 | 390×844 화면 가로 넘침 없음, 세로 카메라 요청, 출력 해상도. 대역은 1280×720(16:9) | 휴대폰 연결·전환·캡처, 실제 출력 비율 |
 | 07 | 사람 검증 순서 유지 | 3명 모수 순서 판별, 포즈·anchor·탈모 정도별 비교. 통과 판정 미수행 |
 | 08 | 준비까지 토큰 0회, 체험 시 1회. 일반 URL 조건 무시, 예상 이미지·조합 표시 | STEP 07 결과로 mode/anchor/방향 확정 |
-| 09 | 캡처 즉시 reason=capture, 폼 중 연결 없음, 양쪽 동의, 전화번호 숫자 저장, 폼 닫기 메모리 폐기 | 운영자·보관 기간·제공받는 자 설정 |
+| 09 | 캡처 즉시 reason=capture, 폼 중 연결 없음, 부위·모수 저장, 정수리 다운로드 파일명, 양쪽 동의, 폼 닫기 메모리 폐기 | 운영자·보관 기간·제공받는 자 설정 |
 | 10 | Drive 업로드, 공개 폴더 거절, 업로드 재시도, 서버 동의 검증 | 실제 서비스 계정·공유 드라이브 저장 |
 | 11 | 같은 IP 4번째 429, 전체 상한 503, 한국 자정 초기화, 실제 Chrome 탭 닫기 beacon, 중복 종료 처리. 종료 기록의 외부 저장 없음 | 실기기 탭 종료 요청 |
 
@@ -43,7 +45,7 @@ Google Drive 연동과 유료 연결은 자격증명 없이 대역으로 검증�
 
 실행 환경은 Node 24.2.0이며, 의존성의 Node 20 지원 조건에 맞춰 최소 버전은 20.9.0입니다. 이미지 저장은 Drive 전용 패키지 `@googleapis/drive` 22를 사용합니다. 프롬프트·HTTP·세션·Drive·Chrome 검증을 아래 명령으로 실행합니다.
 
-최종 검증: Node·Chrome 테스트 총 21개, 프롬프트 검사 3개, 기존 Python 테스트 1개, JavaScript 구문 검사와 Python Ruff 검사 통과. 지정한 외부 저장용 환경변수 없이 CLI 서버가 시작되고 API·리드 생성·이미지 업로드·종료 요청 흐름이 유지되는 것을 확인했습니다.
+정수리 추가 검증: Node·Chrome 테스트 총 22개, 프롬프트 검사 6개, JavaScript 구문 검사 통과. 정수리 3개 원본 이미지의 실제 Blob 전달, 같은 연결에서 부위·모수 전환, 저장 조건과 종료 기록, 이미지 누락 시 처리까지 대역으로 확인했습니다. 기존 Python 테스트 1개 및 Ruff 검사는 이전 변경에서 통과했습니다. 지정한 외부 저장용 환경변수 없이 CLI 서버 시작과 API 흐름도 확인했습니다.
 
 ```bash
 npm run check:prompts

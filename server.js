@@ -39,15 +39,16 @@ export async function createApp({ config = readConfig(), decart, store = new Goo
     if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
     try {
       const token = await client.tokens.create({
-        expiresIn: 60, allowedModels: ["lucy-2.5"], allowedOrigins: [config.origin],
+        // Short-lived client token (same constraints as change_ai/server/token.ts).
+        expiresIn: 300, allowedModels: ["lucy-2.5"], allowedOrigins: [config.origin],
         constraints: { realtime: { maxSessionDuration: 120 } },
       });
       if (!token.apiKey) throw new Error("TOKEN_MISSING");
       const sessionId = randomUUID();
       for (const [id, record] of sessions) if (now() - record.createdAt > 86400000) sessions.delete(id);
       sessions.set(sessionId, { createdAt: now(), ended: false, lead: null });
-      // apiKey here is the short-lived client credential returned by tokens.create().
-      res.json({ token: token.apiKey, sessionId });
+      // token is the short-lived client credential from tokens.create() — never the permanent DECART_API_KEY.
+      res.json({ token: token.apiKey, sessionId, expiresAt: token.expiresAt ? new Date(token.expiresAt).toISOString() : undefined });
     } catch {
       reservation.release();
       logger.error("Decart 토큰 발급 실패");

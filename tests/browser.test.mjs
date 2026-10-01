@@ -27,7 +27,7 @@ export function createDecartClient({apiKey}) {
     const rt = {
       getConnectionState:()=> 'generating',
       on:(event, callback)=> window.__events[event]=callback,
-      set:async(input)=>window.__sets.push(input),
+      set:async(input)=>{if(window.__rejectSet)throw new Error('test set failure');window.__sets.push(input);},
       disconnect:()=>{window.__disconnects++;clearInterval(timer);remote.getTracks().forEach(t=>t.stop());},
     };
     window.__emit=(event,data)=>window.__events[event]?.(data);
@@ -70,6 +70,15 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto(base);
   await expect(page.locator("#prepare")).toBeEnabled();
+  // Changing area retains density and updates crown positioning before connecting.
+  await page.locator('#selection [data-combo="1k"]').click();
+  await page.locator('#selection [data-area="crown"]').click();
+  await expect(page.locator('#selection [data-combo="crown_1k"]')).toHaveAttribute("aria-pressed", "true");
+  await page.locator("#prepare").click();
+  await expect(page.locator("#experience-start")).toBeEnabled();
+  await expect(page.locator("#preparation-guidance")).toContainText("고개를 숙여 정수리");
+  await page.locator('#preparation [data-back]').click();
+  await page.locator('#selection [data-area="hairline"]').click();
   // Test installed SDK + its real dependency graph before substituting paid connections.
   const native = await page.evaluate(async () => {
     const sdk = await import("@decartai/sdk");
@@ -99,13 +108,27 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   await page.locator('#experience [data-combo="2k"]').click();
   await expect(page.locator("#combo-label")).toHaveText("헤어라인 · 2천 모");
   assert.equal(issued, 1, "switching reuses connection");
+  // A failed area switch must leave the previous choice and label intact.
+  await page.evaluate(() => { window.__rejectSet = true; });
+  await page.locator('#experience [data-area="crown"]').click();
+  await expect(page.locator("#error")).toContainText("헤어 참고 이미지 변경에 실패");
+  await expect(page.locator('#experience [data-area="hairline"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#combo-label")).toHaveText("헤어라인 · 2천 모");
+  await page.evaluate(() => { window.__rejectSet = false; });
+  await page.locator('#experience [data-area="crown"]').click();
+  await expect(page.locator("#combo-label")).toHaveText("정수리 · 2천 모");
+  await expect(page.locator("#experience-guidance")).toContainText("고개를 숙여 정수리");
+  assert.equal(await page.evaluate(() => window.__sets.at(-1).prompt.includes("thinning crown")), true);
+  assert.equal(issued, 1, "area switching reuses the same token");
   await page.evaluate(() => window.__emit("connectionChange", "reconnecting"));
-  await expect(page.locator('#experience [data-combo="partial"]')).toBeDisabled();
+  await expect(page.locator('#experience [data-combo="crown_partial"]')).toBeDisabled();
+  await expect(page.locator('#experience [data-area="hairline"]')).toBeDisabled();
   await page.evaluate(() => window.__emit("connectionChange", "generating"));
   await expect(page.locator("#save-result")).toBeEnabled();
   await expect(page.locator("#resolution")).toHaveText("1280 × 720");
   await page.locator("#save-result").click();
   await expect(page.locator("#contact")).toBeVisible();
+  await expect(page.locator("#captured-label")).toHaveText("정수리 · 2천 모");
   assert.equal(await page.evaluate(() => window.__disconnects), 1);
   assert.equal(await page.evaluate(() => window.__camera.getTracks().every((track) => track.readyState === "ended")), true);
   await page.locator("#name").fill("테스트 사용자");
@@ -120,9 +143,11 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   assert.equal(leads.length, 1);
   assert.equal(leads[0].phone, "01012345678");
   assert.equal(leads[0].density, "2k");
+  assert.equal(leads[0].area, "crown");
   await expect.poll(() => sessions.length).toBe(1);
   assert.equal(sessions[0].reason, "capture");
-  assert.equal(sessions[0].switches, 1);
+  assert.equal(sessions[0].switches, 2);
+  assert.equal(sessions[0].combo, "crown_2k");
   // Verify the saved canvas keeps the same red-left / blue-right orientation.
   const decoded = await sharp(leads[0].image).raw().toBuffer({ resolveWithObject: true });
   const pixel = (x, y) => [...decoded.data.subarray((y * decoded.info.width + x) * decoded.info.channels, (y * decoded.info.width + x) * decoded.info.channels + 3)];
@@ -131,7 +156,7 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   const downloadPromise = page.waitForEvent("download");
   await page.locator("#download-saved").click();
   const download = await downloadPromise;
-  assert.match(download.suggestedFilename(), /^text_anchor_2k_정면_.*\.png$/);
+  assert.match(download.suggestedFilename(), /^text_anchor_crown_2k_숙임_.*\.png$/);
   await mkdir("test-results", { recursive: true });
   await page.screenshot({ path: "test-results/mobile-complete.png", fullPage: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -156,17 +181,36 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   // Lab honors URL options and retains the connection after PNG capture.
   await page.goto(`${base}/lab?mode=ref&anchor=off`);
   await expect(page.locator("#prepare")).toBeEnabled();
-  await page.locator('#selection [data-combo="2k"]').click();
+  await page.locator('#selection [data-area="crown"]').click();
+  await page.locator('#selection [data-combo="crown_1k"]').click();
   await page.locator("#prepare").click();
   await expect(page.locator("#experience-start")).toBeEnabled();
   await page.locator("#experience-start").click();
   await expect(page.locator("#lab-capture")).toBeEnabled();
   assert.equal(await page.evaluate(() => window.__options.queryParams.self_anchor), "false");
   assert.equal(await page.evaluate(() => window.__options.initialState.image instanceof Blob), true);
-  await page.locator("#pose").selectOption("좌회전");
+  const refMatches = async (expression, path) => page.evaluate(async ({expression,path}) => {
+    const actual = await crypto.subtle.digest('SHA-256', await (expression === 'initial' ? window.__options.initialState.image : window.__sets.at(-1).image).arrayBuffer());
+    const expected = await crypto.subtle.digest('SHA-256', await (await fetch(path)).arrayBuffer());
+    return String(new Uint8Array(actual)) === String(new Uint8Array(expected));
+  }, {expression,path});
+  assert.equal(await refMatches('initial', '/assets/05_crown_1000.png'), true);
+  await expect(page.locator("#pose")).toHaveValue("숙임");
+  await page.locator('#experience [data-combo="crown_partial"]').click();
+  await expect(page.locator("#combo-label")).toHaveText("정수리 · 부분");
+  assert.equal(await refMatches('set', '/assets/04_crown_partial.png'), true);
+  await page.locator('#experience [data-combo="crown_2k"]').click();
+  await expect(page.locator("#combo-label")).toHaveText("정수리 · 2천 모");
+  assert.equal(await refMatches('set', '/assets/06_crown_2000.png'), true);
+  await page.locator('#experience [data-area="hairline"]').click();
+  await expect(page.locator("#combo-label")).toHaveText("헤어라인 · 2천 모");
+  assert.equal(await refMatches('set', '/assets/03_hairline_2000.png'), true);
+  await page.locator('#experience [data-area="crown"]').click();
+  await expect(page.locator("#combo-label")).toHaveText("정수리 · 2천 모");
+  assert.equal(issued, 3, "all area/density switches share their existing connection");
   const labDownload = page.waitForEvent("download");
   await page.locator("#lab-capture").click();
-  assert.match((await labDownload).suggestedFilename(), /^ref_noanchor_2k_좌회전_.*\.png$/);
+  assert.match((await labDownload).suggestedFilename(), /^ref_noanchor_crown_2k_숙임_.*\.png$/);
   assert.equal(await page.evaluate(() => window.__disconnects), 0);
   await page.evaluate(() => window.__emit("generationTick", { seconds: 120 }));
   await expect(page.locator("#ended-title")).toHaveText("시간 종료");
@@ -196,7 +240,37 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   await expect(closingPage.locator("#experience-start")).toBeEnabled();
   await closingPage.locator("#experience-start").click();
   await expect(closingPage.locator("#lab-capture")).toBeEnabled();
-  await closingPage.close();
+  await closingPage.waitForLoadState("networkidle");
+  // Follow the browser tab-close lifecycle so pagehide/visibilitychange can send the beacon.
+  await closingPage.close({ runBeforeUnload: true });
   await expect.poll(() => sessions.length).toBe(5);
   assert.ok(["hidden", "pagehide"].includes(sessions.at(-1).reason));
+
+  // Missing references disable only their choices; an area can fall back to an available density.
+  const missingPage = await context.newPage();
+  let allCrownsMissing = false;
+  await missingPage.route('**/config', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.mode = 'ref';
+    body.assets.crown_1k = false;
+    if (allCrownsMissing) body.assets.crown_partial = body.assets.crown_2k = false;
+    await route.fulfill({ response, json: body });
+  });
+  await missingPage.route('**/assets/*crown*.png', (route) => {
+    if (allCrownsMissing || route.request().url().includes('05_crown_1000')) return route.fulfill({ status: 404 });
+    return route.continue();
+  });
+  await missingPage.goto(base);
+  await expect(missingPage.locator('#prepare')).toBeEnabled();
+  await missingPage.locator('#selection [data-combo="1k"]').click();
+  await missingPage.locator('#selection [data-area="crown"]').click();
+  await expect(missingPage.locator('#selection [data-combo="crown_partial"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(missingPage.locator('#selection [data-combo="crown_1k"]')).toBeDisabled();
+  allCrownsMissing = true;
+  await missingPage.reload();
+  await expect(missingPage.locator('#prepare')).toBeEnabled();
+  await expect(missingPage.locator('#selection [data-area="crown"]')).toBeDisabled();
+  await expect(missingPage.locator('#selection [data-area="hairline"]')).toHaveAttribute('aria-pressed', 'true');
+  assert.equal(issued, 5, 'camera preparation and missing-asset checks issue no additional tokens');
 });

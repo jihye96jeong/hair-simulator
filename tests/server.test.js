@@ -36,7 +36,7 @@ test("serves the UI, local SDK and config without server secrets", async (t) => 
   assert.equal((await fetch(`${f.base}/vendor/retry.js`)).status, 200);
   const config = await (await fetch(`${f.base}/config`)).json();
   assert.ok(!("decartKey" in config));
-  assert.equal(config.assets.partial, false);
+  assert.deepEqual(config.assets, { partial: true, "1k": true, "2k": true, crown_partial: true, crown_1k: true, crown_2k: true });
   assert.equal((await fetch(`${f.base}/.env`)).status, 404);
   assert.equal((await fetch(`${f.base}/server.js`)).status, 404);
 });
@@ -49,7 +49,7 @@ test("fourth token rejected; model/origin/session duration scoped", async (t) =>
   }
   assert.equal((await f.post("/token")).status, 429);
   assert.equal(f.creates(), 3);
-  assert.deepEqual(f.scopes[0], { expiresIn: 60, allowedModels: ["lucy-2.5"], allowedOrigins: ["http://localhost:3000"], constraints: { realtime: { maxSessionDuration: 120 } } });
+  assert.deepEqual(f.scopes[0], { expiresIn: 300, allowedModels: ["lucy-2.5"], allowedOrigins: ["http://localhost:3000"], constraints: { realtime: { maxSessionDuration: 120 } } });
 });
 test("global quota returns 503 and cross-origin requests are rejected", async (t) => {
   const f = await fixture(t, { env: { TOKEN_DAILY_TOTAL_LIMIT: "1" } });
@@ -79,7 +79,7 @@ test("server enforces both consents, phone, region and WebP; valid lead saved on
   const f = await fixture(t);
   const { sessionId } = await (await f.post("/token")).json();
   const lead = await validLead(sessionId);
-  for (const patch of [{ consentAt: null }, { action: "referral" }, { phone: "bad" }, { phone: "0101234567" }, { phone: "010abc12345678" }, { region: "없는 지역" }, { image: "not-image" }, { density: "bad" }, { sessionId: "unknown" }]) {
+  for (const patch of [{ consentAt: null }, { action: "referral" }, { phone: "bad" }, { phone: "0101234567" }, { phone: "010abc12345678" }, { region: "없는 지역" }, { image: "not-image" }, { area: "bad" }, { area: "crown", density: "crown_2k" }, { density: "bad" }, { sessionId: "unknown" }]) {
     assert.equal((await f.post("/leads", { ...lead, ...patch })).status, 400);
   }
   assert.equal(f.leads.length, 0);
@@ -88,6 +88,17 @@ test("server enforces both consents, phone, region and WebP; valid lead saved on
   assert.equal(f.leads.length, 1);
   assert.equal(f.leads[0].lead.phone, "01012345678");
   assert.ok(Buffer.isBuffer(f.leads[0].lead.image));
+});
+test("crown captures preserve area and density for all three densities", async (t) => {
+  const f = await fixture(t);
+  for (const density of ["partial", "1k", "2k"]) {
+    const { sessionId } = await (await f.post("/token")).json();
+    const lead = { ...await validLead(sessionId), area: "crown", density };
+    assert.equal((await f.post("/leads", lead)).status, 200);
+    assert.equal(f.leads.at(-1).lead.area, "crown");
+    assert.equal(f.leads.at(-1).lead.density, density);
+    assert.equal((await f.post("/session-end", { sessionId, reason: "capture", billedSeconds: 10, wallSeconds: 11, switches: 1, combo: `crown_${density}`, captured: true })).status, 204);
+  }
 });
 test("referral with explicit third-party consent is accepted", async (t) => {
   const f = await fixture(t);

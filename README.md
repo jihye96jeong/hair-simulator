@@ -1,4 +1,4 @@
-# 모수 — 실시간 헤어라인 시뮬레이터
+# 모수 — 실시간 헤어 시뮬레이터
 
 `moisu-simulator-steps.md` STEP 01~11과 `prd-hair-simulator.md`를 반영한 Node 20.9+ / Express / 바닐라 HTML·JS 앱입니다. 앱 빌드 과정이나 CDN 없이 설치된 Decart SDK 0.2.3을 네이티브 ES 모듈로 제공합니다. 이미지 저장은 Node 20을 지원하는 Drive 전용 패키지 `@googleapis/drive` 22를 사용합니다. 기존 Python 예제는 그대로 두었으며 시뮬레이터 실행에는 사용하지 않습니다.
 
@@ -15,7 +15,8 @@ npm start
 ## 구현 범위와 기본값
 
 - 첫 화면에서 부위·모수 선택 → 로컬 카메라 준비 → 최대 2분 체험 → 캡처 후 연락처·동의 → 완료·PNG 다운로드.
-- 헤어라인의 부분 / 1천 모 / 2천 모를 한 연결에서 전환합니다. 정수리는 단계 문서의 이후 범위여서 비활성화했습니다.
+- 헤어라인과 정수리의 부분 / 1천 모 / 2천 모, 총 6개 조합을 한 연결에서 전환합니다. 부위를 바꾸면 같은 모수를 유지하고, 해당 이미지가 없으면 사용 가능한 모수로 전환합니다.
+- 정수리는 카메라 준비 및 실시간 화면에서 고개 숙임을 안내합니다. 캡처 라벨·리드의 부위와 모수·다운로드 파일명에도 정수리가 반영됩니다.
 - 기본 설정은 `SIMULATOR_MODE=ref`, `SIMULATOR_ANCHOR=on`, 모바일 세로 UI입니다. 모델은 `lucy-2.5`, 표준 속도, 720p입니다. 실제 출력 비율은 원격 영상의 해상도를 그대로 표시합니다.
 - 일반 화면의 URL 파라미터는 조건을 바꾸지 않습니다. STEP 07 사람 검증이 끝나면 환경변수로 확정값을 고정하세요.
 - 캡처가 성공하면 폼을 표시하기 **전에** 연결과 카메라를 종료합니다. 개인정보는 동의 후 제출 시에만 전송합니다. 폼을 닫으면 캡처를 메모리에서 버립니다.
@@ -23,15 +24,20 @@ npm start
 
 ## 머리 참고 이미지
 
-다음 세 파일을 얼굴이 없는 실제 머리 참고 이미지로 교체하세요.
+현재 다음 여섯 PNG 원본을 부위·모수별 참고 이미지로 사용합니다.
 
 ```text
-public/assets/hairline_partial.webp
-public/assets/hairline_1k.webp
-public/assets/hairline_2k.webp
+public/assets/01_hairline_partial.png  # 헤어라인 부분
+public/assets/02_hairline_1000.png     # 헤어라인 1천 모
+public/assets/03_hairline_2000.png     # 헤어라인 2천 모
+public/assets/04_crown_partial.png    # 정수리 부분
+public/assets/05_crown_1000.png       # 정수리 1천 모
+public/assets/06_crown_2000.png       # 정수리 2천 모
 ```
 
-현재 파일은 1280×720 회색 플레이스홀더입니다. `placeholder_*.webp`는 누락 시 검증 화면에서 쓰는 별도 예비 이미지입니다. 일반 `ref` 화면은 누락되거나 플레이스홀더인 조합을 비활성화하며, 새로고침하면 교체를 감지합니다. 플레이스홀더로 모수 차이를 판정할 수 없습니다. `npm run assets:placeholders`는 실제 에셋을 덮어쓰지 않습니다.
+참고 이미지는 1254×1254이며 SDK에 원본 Blob으로 전달합니다. 파일명 변경 시 `public/combos.js`의 경로도 수정하세요. 기존 헤어라인 조합 키는 `partial`, `1k`, `2k`, 정수리 조합 키는 `crown_partial`, `crown_1k`, `crown_2k`입니다. 리드 API에는 각각 `area: hairline|crown`, `density: partial|1k|2k`로 전송합니다.
+
+일반 `ref` 화면은 누락되거나 플레이스홀더인 조합을 비활성화하며, 새로고침하면 같은 경로의 이미지 교체를 감지합니다. `npm run assets:placeholders`는 검증 화면의 누락 시 예비 이미지(`placeholder_*.webp`, 1280×720)만 생성하며 실제 참고 이미지를 생성하거나 덮어쓰지 않습니다.
 
 ## 기술 검증 화면
 
@@ -45,7 +51,7 @@ http://localhost:3000/lab?mode=text&anchor=off
 
 - 파일명: `{mode}_{anchor|noanchor}_{combo}_{정면|좌회전|우회전|숙임}_{ISO시각}.png`
 - `mirror: "auto"`는 전면 카메라로 보고되는 입력을 SDK에서 뒤집습니다. 출력 video에는 CSS 반전을 적용하지 않고 동일한 원격 픽셀을 canvas에 그려 화면과 파일의 좌우를 일치시킵니다. 로컬 준비 미리보기만 CSS 반전합니다.
-- 세로 화면은 `getUserMedia`에 `facingMode: "user"`만 요청하고, 가로 화면은 1280×720도 요청합니다. 모델의 기본 출력은 1280×720(16:9)이고 실제 해상도는 화면 오른쪽 아래에서 확인하세요.
+- 세로 화면은 `getUserMedia`에 `facingMode: "user"`와 모델 ideal width/height/fps를 요청합니다. 가로 화면도 동일합니다. 모델의 기본 출력은 1280×720(16:9)이고 실제 해상도는 화면 오른쪽 아래에서 확인하세요.
 - 콘솔 `generationTick`에 원래 `seconds`, 누적 `billedSeconds`, 연결 상태를 표시합니다. 재연결에서 seconds가 줄면 누적값을 유지하고 `generationTick reset`을 출력합니다. 새 체험은 0부터 시작합니다.
 - 종료 시 `{ reason, billedSeconds, wallSeconds, switches, mode, anchor, combo, captured }` 로그가 한 번 출력됩니다.
 
@@ -76,7 +82,7 @@ const queryParams = { self_anchor: "false" };
 ## 비용 보호와 제한
 
 - `/token`: IP당 하루 기본 3회(`TOKEN_DAILY_IP_LIMIT`), 전체 하루 기본 100회(`TOKEN_DAILY_TOTAL_LIMIT`). 동일 IP 4번째는 429, 전체 상한은 503과 재시도 안내입니다. 동시 요청도 예약 카운터로 제한하고 토큰 발급 실패는 횟수를 복구합니다.
-- 토큰: 60초 유효, `lucy-2.5`와 `APP_ORIGIN` 제한, `constraints.realtime.maxSessionDuration=120`. 토큰 만료만으로 기존 연결은 종료되지 않으므로 클라이언트 종료와 서버 제약을 함께 적용합니다.
+- 토큰: 300초 유효, `lucy-2.5`와 `APP_ORIGIN` 제한, `constraints.realtime.maxSessionDuration=120`. 토큰 만료만으로 기존 연결은 종료되지 않으므로 클라이언트 종료와 서버 제약을 함께 적용합니다.
 - 클라이언트: tick 누적 120초 종료, SDK 연결 시작부터 125초 보조 타이머, `visibilitychange`/`pagehide` 종료, 중복 disconnect·종료 로그 방지.
 - 현재 SDK connect에는 AbortSignal이 없습니다. 연결 완료 전에 떠나면 카메라는 즉시 중지하고 늦게 반환되는 SDK 연결을 즉시 disconnect합니다. 대기 구간에도 서버 세션 상한이 적용됩니다.
 - 종료 기록은 `navigator.sendBeacon`으로 보내고 큐 등록 실패 시 `fetch(..., {keepalive:true})`로 재시도합니다. 실제 Chrome 탭 닫기 전송을 확인했지만 오프라인·브라우저 강제 종료에서는 전송을 보장하지 않습니다.

@@ -19,3 +19,6 @@ credentials/
 .env
 .env.*
 !.env.example
+
+# Local reference clone (not part of this repo)
+change_ai/

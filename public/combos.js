@@ -1,12 +1,19 @@
-const KEEP = "The hair stays attached to the scalp and moves with the person's head. Keep the person's face, eyes, eyebrows, skin, and identity unchanged.";
+// KEEP draws from change_ai/shared/modes.ts hair prompt: identity/face stay; do not copy the reference face.
+const KEEP = "The new hair grows from the person's own scalp and moves with their head. Keep the person's exact face, eyes, eyebrows, nose, mouth, skin, identity, body, clothes, and the background unchanged. Do not copy a face from the reference.";
 
 export const COMBOS = Object.freeze({
-  partial: { label: "헤어라인 · 부분", image: "assets/hairline_partial.webp",
+  partial: { area: "hairline", density: "partial", label: "헤어라인 · 부분", image: "assets/01_hairline_partial.png",
     prompt: "Replace the person's receding hairline with the short black hairline from the reference image, filling only the corners of the temples with natural-density hair. " + KEEP },
-  "1k": { label: "헤어라인 · 1천 모", image: "assets/hairline_1k.webp",
+  "1k": { area: "hairline", density: "1k", label: "헤어라인 · 1천 모", image: "assets/02_hairline_1000.png",
     prompt: "Replace the person's receding hairline with the fuller short black hairline from the reference image, filling the temples with dense, evenly spaced hair. " + KEEP },
-  "2k": { label: "헤어라인 · 2천 모", image: "assets/hairline_2k.webp",
+  "2k": { area: "hairline", density: "2k", label: "헤어라인 · 2천 모", image: "assets/03_hairline_2000.png",
     prompt: "Replace the person's receding hairline with the low, full short black hairline from the reference image, covering the whole front of the scalp with dense hair. " + KEEP },
+  crown_partial: { area: "crown", density: "partial", label: "정수리 · 부분", image: "assets/04_crown_partial.png",
+    prompt: "Replace only the person's thinning crown with the short black crown hair from the reference image, lightly filling the small central thinning patch with natural-density hair. Preserve the natural hair whorl, existing front hairline, temples, and surrounding hairstyle. " + KEEP },
+  crown_1k: { area: "crown", density: "1k", label: "정수리 · 1천 모", image: "assets/05_crown_1000.png",
+    prompt: "Replace only the person's thinning crown with the fuller short black crown hair from the reference image, filling the central crown with dense, evenly spaced hair. Preserve the natural hair whorl, existing front hairline, temples, and surrounding hairstyle. " + KEEP },
+  crown_2k: { area: "crown", density: "2k", label: "정수리 · 2천 모", image: "assets/06_crown_2000.png",
+    prompt: "Replace only the person's thinning crown with the full short black crown hair from the reference image, covering the whole thinning crown area with dense hair. Preserve the natural hair whorl, existing front hairline, temples, and surrounding hairstyle. " + KEEP },
 });
 
 export function stateOf(key, mode, images) {
