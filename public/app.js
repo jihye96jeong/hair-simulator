@@ -11,7 +11,7 @@ let config;
 let combo = "partial";
 let mode = "ref";
 let anchor = "on";
-let screen = "welcome";
+let screen = "selection";
 let camera = null;
 let cameraEpoch = 0;
 let session = null;
@@ -42,7 +42,6 @@ function show(next) {
   if (["contact", "complete"].includes(screen) && !["contact", "complete"].includes(next)) discardCapture();
   screen = next;
   for (const section of document.querySelectorAll(".screen")) section.hidden = section.id !== next;
-  $("step-label").textContent = lab ? "기술 검증" : ({ welcome: "내 얼굴로 보는 헤어라인", selection: "1 / 4 선택", preparation: "2 / 4 준비", experience: "3 / 4 체험", contact: "4 / 4 결과", complete: "저장 완료", ended: "체험 종료" }[next]);
   updateButtons();
 }
 function stopCamera() {
@@ -92,21 +91,21 @@ async function prepareCamera() {
   error("");
   show("preparation");
   const epoch = ++cameraEpoch;
-  $("camera-message").textContent = "카메라 권한을 요청하고 있어요.";
+  $("camera-message").textContent = "카메라 권한 요청 중";
   try {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error("휴대폰에서는 HTTPS 주소로 접속해 주세요.");
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("카메라 사용에 HTTPS 연결이 필요합니다.");
     const portrait = matchMedia("(orientation: portrait)").matches;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: portrait ? { facingMode: "user" } : { facingMode: "user", width: 1280, height: 720 } });
     if (epoch !== cameraEpoch || document.hidden || screen !== "preparation") { stream.getTracks().forEach((track) => track.stop()); return; }
     camera = stream;
     $("preview").srcObject = stream;
     await $("preview").play();
-    $("camera-message").textContent = "준비가 되면 아래 버튼을 눌러 주세요. 아직 체험 연결 전이에요.";
+    $("camera-message").textContent = "카메라 준비 완료 · 실시간 연결 대기";
     updateButtons();
   } catch (cause) {
     if (epoch !== cameraEpoch) return;
     stopCamera();
-    const message = cause.name === "NotAllowedError" ? "카메라 접근을 허용한 뒤 다시 시작해 주세요." : cause.name === "NotFoundError" ? "사용할 수 있는 카메라를 찾지 못했어요." : "카메라를 열지 못했어요. 카메라 권한과 HTTPS 주소를 확인해 주세요.";
+    const message = cause.name === "NotAllowedError" ? "카메라 권한이 거부되었습니다. 접근 허용 후 재시도하십시오." : cause.name === "NotFoundError" ? "사용 가능한 카메라가 없습니다." : "카메라 초기화 실패. 권한 및 HTTPS 연결을 확인하십시오.";
     $("camera-message").textContent = message;
     error(message);
     updateButtons();
@@ -125,19 +124,19 @@ async function startExperience() {
   const active = new RealtimeSession({
     mode, anchor, combo,
     onState: (state) => {
-      $("connection-state").textContent = { connecting: "연결 중", connected: "연결됨", generating: "체험 중", reconnecting: "다시 연결 중", disconnected: "종료" }[state];
+      $("connection-state").textContent = { connecting: "연결 중", connected: "연결됨", generating: "생성 중", reconnecting: "재연결 중", disconnected: "종료" }[state];
       updateButtons();
     },
     onTick: updateTime,
-    onRemote: (stream) => { $("output").srcObject = stream; $("output").play().catch(() => error("영상 재생을 위해 화면을 다시 눌러 주세요.")); },
+    onRemote: (stream) => { $("output").srcObject = stream; $("output").play().catch(() => error("영상 재생 대기. 영상을 누르면 재생됩니다.")); },
     onError: (message) => { console.error(message); error(message); },
     onStop: ({ reason }) => {
       stopCamera();
       $("output").srcObject = null;
       $("connection-state").textContent = "종료";
       if (reason === "capture") return;
-      $("ended-title").textContent = reason === "cap" ? "시간이 끝났어요" : "체험이 끝났어요";
-      $("ended-message").textContent = { hidden: "다른 화면으로 이동해 체험을 종료했어요.", manual: "내 헤어라인의 변화를 비교해 보셨나요?", error: "연결 상태를 확인한 뒤 다시 시작해 주세요.", disconnected: "연결이 종료되었어요. 다시 체험할 수 있어요." }[reason] || "다시 시작하면 다른 모수도 비교할 수 있어요.";
+      $("ended-title").textContent = reason === "cap" ? "시간 종료" : "연결 종료";
+      $("ended-message").textContent = { hidden: "화면 이탈로 연결이 종료되었습니다.", manual: "연결을 종료했습니다.", error: "연결 오류. 네트워크 상태를 확인하십시오.", disconnected: "원격 연결이 종료되었습니다." }[reason] || "최대 연결 시간 120초에 도달했습니다.";
       if (!["contact", "complete"].includes(screen)) show("ended");
       updateButtons();
     }, report: reportEnd,
@@ -158,7 +157,7 @@ async function startExperience() {
       ...(anchor === "off" ? { queryParams: { self_anchor: "false" } } : {}),
     });
   } catch {
-    error("체험 연결을 준비하지 못했어요. 잠시 후 다시 시도해 주세요.");
+    error("연결 초기화 실패. 잠시 후 재시도하십시오.");
     active.stop("error");
   } finally {
     connecting = false;
@@ -176,7 +175,7 @@ async function selectCombo(key) {
       $("combo-label").textContent = COMBOS[combo].label;
     }
   } catch {
-    error("모수를 바꾸지 못했어요. 연결 상태를 확인해 주세요.");
+    error("모수 변경 실패. 연결 상태를 확인하십시오.");
   } finally { switching = false; updateButtons(); }
 }
 function openForm(nextAction) {
@@ -191,8 +190,8 @@ function openForm(nextAction) {
     $("captured-image").src = canvas.toDataURL("image/webp", .85);
     $("captured-image").parentElement.style.aspectRatio = `${canvas.width} / ${canvas.height}`;
     $("captured-label").textContent = COMBOS[captureCombo].label;
-    $("contact-title").textContent = action === "referral" ? "병원 소개를 요청해 볼까요?" : "내 결과를 남겨 볼까요?";
-    $("submit-lead").textContent = action === "referral" ? "병원 소개 요청하기" : "결과 저장하기";
+    $("contact-title").textContent = action === "referral" ? "병원 소개 요청" : "결과 저장";
+    $("submit-lead").textContent = action === "referral" ? "병원 소개 요청" : "결과 저장";
     $("third-party").hidden = action !== "referral";
     $("third-consent").required = action === "referral";
     $("lead-form").reset();
@@ -200,7 +199,7 @@ function openForm(nextAction) {
     error("", "form-error");
     show("contact");
     updateForm();
-  } catch (cause) { error(cause.message || "현재 영상을 캡처하지 못했어요."); }
+  } catch (cause) { error(cause.message || "영상 캡처 실패."); }
 }
 function updateForm() {
   $("submit-lead").disabled = submitting || !captureCanvas || !$("name").value.trim() || !validPhone($("phone").value) || !$("region").value || !$("consent").checked || (action === "referral" && !$("third-consent").checked);
@@ -223,12 +222,12 @@ async function submitLead(event) {
     const response = await fetch("/leads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error);
-    $("complete-title").textContent = action === "referral" ? "소개 요청을 남겼어요" : "결과를 저장했어요";
-    $("complete-message").textContent = action === "referral" ? "선택한 지역과 연락처로 소개 의사를 기록했어요. 아래에서 내 예상 이미지를 내려받을 수 있어요." : "내 예상 이미지를 아래에서 내려받을 수 있어요.";
+    $("complete-title").textContent = action === "referral" ? "소개 요청 접수 완료" : "저장 완료";
+    $("complete-message").textContent = action === "referral" ? "병원 소개 요청 제출 완료 · PNG 다운로드 가능" : "이미지 저장 완료 · PNG 다운로드 가능";
     $("saved-image").src = $("captured-image").src;
     $("saved-stage").style.aspectRatio = `${captureCanvas.width} / ${captureCanvas.height}`;
     show("complete");
-  } catch (cause) { error(cause.message || "저장하지 못했어요. 다시 시도해 주세요.", "form-error"); }
+  } catch (cause) { error(cause.message || "저장 실패. 재시도하십시오.", "form-error"); }
   finally { submitting = false; $("close-form").disabled = false; updateForm(); }
 }
 function reset() {
@@ -236,7 +235,7 @@ function reset() {
   stopCamera();
   discardCapture();
   error("");
-  show("welcome");
+  show("selection");
 }
 
 for (const container of document.querySelectorAll("[data-combos]")) {
@@ -253,7 +252,6 @@ for (const container of document.querySelectorAll("[data-combos]")) {
   }
 }
 for (const region of REGIONS) $("region").add(new Option(region, region));
-$("start").addEventListener("click", () => show("selection"));
 $("prepare").addEventListener("click", prepareCamera);
 $("experience-start").addEventListener("click", startExperience);
 $("disconnect").addEventListener("click", () => session?.stop("manual"));
@@ -285,7 +283,7 @@ window.addEventListener("pagehide", () => { session?.stop("pagehide"); stopCamer
 window.addEventListener("pageshow", (event) => { if (event.persisted) reset(); });
 
 async function initialize() {
-  $("start").disabled = true;
+  updateButtons();
   try {
     const response = await fetch("/config");
     if (!response.ok) throw new Error();
@@ -307,12 +305,11 @@ async function initialize() {
     }));
     if (!usable(combo)) {
       combo = Object.keys(COMBOS).find(usable) || "partial";
-      error("헤어라인 이미지를 준비하고 있어요. 준비가 끝나면 체험할 수 있습니다.");
+      error("참고 이미지 미등록. 이미지 등록 후 연결할 수 있습니다.");
     }
-    if (mode === "ref" && !images[combo]) error("헤어라인 이미지를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.");
+    if (mode === "ref" && !images[combo]) error("참고 이미지 로드 실패. 새로고침 후 재시도하십시오.");
     if (lab && mode === "ref" && !config.assets[combo]) error("현재 회색 플레이스홀더입니다. 실제 머리 참고 이미지로 교체한 뒤 얼굴·모수 차이를 검증하세요.");
-    $("start").disabled = false;
-    updateButtons();
-  } catch { error("화면을 준비하지 못했어요. 새로고침 후 다시 시도해 주세요."); }
+    show("selection");
+  } catch { error("설정 로드 실패. 새로고침 후 재시도하십시오."); }
 }
 initialize();

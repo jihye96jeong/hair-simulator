@@ -69,7 +69,7 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto(base);
-  await expect(page.locator("#start")).toBeEnabled();
+  await expect(page.locator("#prepare")).toBeEnabled();
   // Test installed SDK + its real dependency graph before substituting paid connections.
   const native = await page.evaluate(async () => {
     const sdk = await import("@decartai/sdk");
@@ -83,8 +83,7 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   // A reload clears the browser module cache, then intercept only the SDK in tests.
   await page.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
   await page.reload();
-  await expect(page.locator("#start")).toBeEnabled();
-  await page.locator("#start").click();
+  await expect(page.locator("#prepare")).toBeEnabled();
   await page.locator('#selection [data-combo="1k"]').click();
   await page.locator("#prepare").click();
   await expect(page.locator("#experience-start")).toBeEnabled();
@@ -139,7 +138,6 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
 
   // Referral requires its own consent and closing the form discards the face.
   await page.locator('#complete [data-back]').click();
-  await page.locator("#start").click();
   await page.locator("#prepare").click();
   await expect(page.locator("#experience-start")).toBeEnabled();
   await page.locator("#experience-start").click();
@@ -157,8 +155,7 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
 
   // Lab honors URL options and retains the connection after PNG capture.
   await page.goto(`${base}/lab?mode=ref&anchor=off`);
-  await expect(page.locator("#start")).toBeEnabled();
-  await page.locator("#start").click();
+  await expect(page.locator("#prepare")).toBeEnabled();
   await page.locator('#selection [data-combo="2k"]').click();
   await page.locator("#prepare").click();
   await expect(page.locator("#experience-start")).toBeEnabled();
@@ -172,7 +169,7 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   assert.match((await labDownload).suggestedFilename(), /^ref_noanchor_2k_좌회전_.*\.png$/);
   assert.equal(await page.evaluate(() => window.__disconnects), 0);
   await page.evaluate(() => window.__emit("generationTick", { seconds: 120 }));
-  await expect(page.locator("#ended-title")).toHaveText("시간이 끝났어요");
+  await expect(page.locator("#ended-title")).toHaveText("시간 종료");
   assert.equal(await page.evaluate(() => window.__disconnects), 1);
 
   // A fresh connection starts at zero and hides safely on background transition.
@@ -194,8 +191,7 @@ test("browser: native SDK imports, product flow, capture, consent, lab and autom
   const closingPage = await context.newPage();
   await closingPage.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
   await closingPage.goto(`${base}/lab?mode=text`);
-  await expect(closingPage.locator("#start")).toBeEnabled();
-  await closingPage.locator("#start").click();
+  await expect(closingPage.locator("#prepare")).toBeEnabled();
   await closingPage.locator("#prepare").click();
   await expect(closingPage.locator("#experience-start")).toBeEnabled();
   await closingPage.locator("#experience-start").click();

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f4f5f2">
-  <title>모수 — 내 얼굴로 보는 헤어라인</title>
+  <meta name="theme-color" content="#f5f6f8">
+  <title>모수 | 헤어라인 시뮬레이터</title>
   <link rel="stylesheet" href="/styles.css">
   <script type="importmap">
   { "imports": {
@@ -22,63 +22,51 @@
 </head>
 <body>
   <main class="shell">
-    <header class="header"><a class="brand" href="/" aria-label="모수 처음으로">모수<span>MOISU</span></a><span id="step-label">내 얼굴로 보는 헤어라인</span></header>
     <p id="error" class="notice error" role="alert" hidden></p>
-    <section id="welcome" class="screen" aria-labelledby="welcome-title">
-      <p class="eyebrow">헤어라인 시뮬레이터</p>
-      <h1 id="welcome-title">머리가 달라지면,<br>나는 어떻게 보일까요?</h1>
-      <p class="intro">내 얼굴에서 직접 비교해 보세요.<br>부분부터 2천 모까지, 카메라로 간편하게.</p>
-      <div class="hair-illustration" aria-hidden="true"><div class="head"><div class="hair"></div><div class="brow left"></div><div class="brow right"></div><div class="nose"></div></div><span>부분</span><span>1천 모</span><span>2천 모</span></div>
-      <p class="disclaimer">예상 이미지이며 수술 결과를 보장하지 않습니다.</p>
-      <button id="start" class="primary">내 헤어라인 확인하기 <span aria-hidden="true">→</span></button>
-      <p class="small center">가입 없이 최대 2분 · 체험만 하면 연락처가 필요 없어요</p>
-    </section>
-
-    <section id="selection" class="screen" hidden aria-labelledby="selection-title">
-      <p class="eyebrow">01 / 선택</p><h1 id="selection-title">어디를 채워 볼까요?</h1><p class="intro">먼저 부위와 모수를 골라 주세요.</p>
-      <h2>부위</h2><div class="area-buttons"><button class="selected" aria-pressed="true">헤어라인</button><button disabled>정수리 <small>준비 중</small></button></div>
-      <h2>모수</h2><div class="combo-buttons" data-combos></div>
-      <p class="small">모수는 비교를 위한 조건이에요. 필요한 모수는 전문 상담으로 확인하세요.</p>
-      <button id="prepare" class="primary">카메라 준비하기 <span aria-hidden="true">→</span></button><button class="text-button" data-back>처음으로</button>
+    <section id="selection" class="screen" aria-labelledby="selection-title">
+      <h1 id="selection-title">시뮬레이션 설정</h1>
+      <div class="settings-row"><h2>부위</h2><div class="area-buttons"><button class="selected" aria-pressed="true">헤어라인</button><button disabled>정수리 <small>미지원</small></button></div></div>
+      <div class="settings-row"><h2>모수</h2><div class="combo-buttons" data-combos></div></div>
+      <dl class="session-details"><div><dt>연결 시간</dt><dd>최대 120초</dd></div><div><dt>입력</dt><dd>전면 카메라</dd></div></dl>
+      <p class="small">모수는 비교 조건입니다. 예상 이미지는 수술 결과를 보장하지 않습니다.</p>
+      <button id="prepare" class="primary" disabled>카메라 준비</button>
     </section>
 
     <section id="preparation" class="screen" hidden aria-labelledby="preparation-title">
-      <p class="eyebrow">02 / 준비</p><h1 id="preparation-title">얼굴을 정면에 맞춰 주세요</h1><p class="intro">이마가 잘 보이도록 머리를 정리해 주세요.</p>
-      <div class="video-stage preview-stage"><video id="preview" autoplay muted playsinline></video><div class="face-guide" aria-hidden="true"></div><span class="video-chip bottom">얼굴과 이마를 가이드 안에 맞춰 주세요</span></div>
-      <p id="camera-message" class="small center" role="status">카메라 권한을 요청하고 있어요.</p>
-      <button id="experience-start" class="primary" disabled>최대 2분 체험 시작</button><button class="text-button" data-back>처음으로</button>
+      <h1 id="preparation-title">카메라 준비</h1><p class="small">정면 촬영 · 얼굴과 이마를 가이드 안에 배치</p>
+      <div class="video-stage preview-stage"><video id="preview" autoplay muted playsinline></video><div class="face-guide" aria-hidden="true"></div><span class="video-chip bottom">카메라 미리보기</span></div>
+      <p id="camera-message" class="small" role="status">카메라 권한 요청 중</p>
+      <button id="experience-start" class="primary" disabled>연결 시작</button><button class="text-button" data-back>설정으로 돌아가기</button>
     </section>
 
     <section id="experience" class="screen" hidden aria-labelledby="experience-title">
-      <div class="experience-heading"><h1 id="experience-title">내 헤어라인 비교</h1><span id="remaining" role="timer">120초 남음</span></div>
-      <progress id="time-bar" max="120" value="120" aria-label="남은 체험 시간"></progress>
-      <p id="experience-note" class="small">지금부터 최대 2분, 모수를 바꿔 비교해 보세요.</p>
+      <div class="experience-heading"><h1 id="experience-title">실시간 시뮬레이션</h1><span id="remaining" role="timer">120초 남음</span></div>
+      <progress id="time-bar" max="120" value="120" aria-label="남은 연결 시간"></progress>
       <div class="video-stage"><video id="output" autoplay muted playsinline></video><span id="combo-label" class="video-chip top-left">헤어라인 · 부분</span><span id="connection-state" class="video-chip top-right" role="status">연결 준비</span><span class="video-chip bottom">예상 이미지</span><span id="resolution" class="resolution"></span></div>
       <div class="combo-buttons" data-combos></div>
       <p class="small center">예상 이미지이며 수술 결과를 보장하지 않습니다.</p>
-      <div id="product-actions"><button id="save-result" class="primary" disabled>이 결과 저장</button><button id="referral" class="secondary" disabled>병원 소개 받기</button></div>
+      <div id="product-actions" class="action-grid"><button id="save-result" class="primary" disabled>결과 저장</button><button id="referral" class="secondary" disabled>병원 소개 요청</button></div>
       <div id="lab-actions" hidden><label class="pose-label" for="pose">촬영 포즈<select id="pose"><option>정면</option><option>좌회전</option><option>우회전</option><option>숙임</option></select></label><button id="lab-capture" class="primary" disabled>PNG 캡처</button><p class="small">캡처 후에도 체험 연결이 유지됩니다.</p><p id="lab-conditions" class="small"></p></div>
-      <button id="disconnect" class="text-button">체험 끝내기</button>
+      <button id="disconnect" class="text-button">연결 종료</button>
     </section>
 
     <section id="contact" class="screen" hidden aria-labelledby="contact-title">
-      <p class="eyebrow">04 / 결과</p><h1 id="contact-title">내 결과를 남겨 볼까요?</h1>
+      <h1 id="contact-title">결과 저장</h1>
       <div class="video-stage captured-stage"><img id="captured-image" alt="선택한 헤어라인의 예상 이미지"><span id="captured-label" class="video-chip top-left"></span><span class="video-chip bottom">예상 이미지</span></div>
-      <p class="small center">체험이 종료되었어요. 연락처를 입력해도 연결 시간은 늘지 않아요.</p>
+      <p class="small">캡처 완료 · 카메라 및 실시간 연결 종료</p>
       <form id="lead-form">
-        <label for="name">이름<input id="name" name="name" autocomplete="name" maxlength="50" required placeholder="성함을 입력해 주세요"></label>
+        <label for="name">이름<input id="name" name="name" autocomplete="name" maxlength="50" required></label>
         <label for="phone">휴대폰<input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" required placeholder="010-1234-5678" maxlength="20"></label>
-        <label for="region">지역<select id="region" name="region" required><option value="">시·도를 선택해 주세요</option></select></label>
+        <label for="region">지역<select id="region" name="region" required><option value="">시·도 선택</option></select></label>
         <div class="consent-block"><label class="check"><input id="consent" type="checkbox" required><span>개인정보 수집·이용에 동의합니다. <strong>(필수)</strong></span></label><details><summary>수집·이용 내용 보기</summary><p id="privacy-text"></p><p>동의를 거부할 수 있으며, 동의하지 않아도 체험할 수 있습니다. 결과 저장은 동의 후 가능합니다.</p></details></div>
         <div id="third-party" class="consent-block" hidden><label class="check"><input id="third-consent" type="checkbox"><span>병원 소개를 위한 제3자 제공에 동의합니다. <strong>(필수)</strong></span></label><details><summary>제3자 제공 내용 보기</summary><p id="referral-text"></p><p>동의를 거부할 수 있으며, 거부 시 병원 소개 요청은 제출되지 않습니다.</p></details></div>
-        <p id="form-error" class="notice error" role="alert" hidden></p><button id="submit-lead" class="primary" disabled>결과 저장하기</button>
+        <p id="form-error" class="notice error" role="alert" hidden></p><button id="submit-lead" class="primary" disabled>결과 저장</button>
       </form>
-      <button id="close-form" class="text-button">저장하지 않고 닫기</button>
+      <button id="close-form" class="text-button">취소</button>
     </section>
 
-    <section id="ended" class="screen" hidden aria-labelledby="ended-title"><p class="eyebrow">체험 종료</p><h1 id="ended-title">시간이 끝났어요</h1><p id="ended-message" class="intro">내 헤어라인의 변화를 비교해 보셨나요?</p><button id="retry" class="primary">다시 하기</button><p class="small center">기본 체험 횟수는 하루 3회예요.</p></section>
-    <section id="complete" class="screen" hidden aria-labelledby="complete-title"><p class="eyebrow">완료</p><h1 id="complete-title">결과를 저장했어요</h1><p id="complete-message" class="intro"></p><div id="saved-stage" class="video-stage"><img id="saved-image" alt="저장한 헤어라인 예상 이미지"></div><button id="download-saved" class="primary">내 예상 이미지 다운로드</button><button class="text-button" data-back>처음으로</button></section>
-    <footer>모수 <span>내 얼굴로 보는 작은 변화</span></footer>
+    <section id="ended" class="screen" hidden aria-labelledby="ended-title"><h1 id="ended-title">시간 종료</h1><p id="ended-message" class="small"></p><button id="retry" class="primary">설정으로 돌아가기</button></section>
+    <section id="complete" class="screen" hidden aria-labelledby="complete-title"><h1 id="complete-title">저장 완료</h1><p id="complete-message" class="small"></p><div id="saved-stage" class="video-stage"><img id="saved-image" alt="저장한 헤어라인 예상 이미지"></div><button id="download-saved" class="primary">PNG 다운로드</button><button class="text-button" data-back>설정으로 돌아가기</button></section>
   </main>
 </body>
 </html>
