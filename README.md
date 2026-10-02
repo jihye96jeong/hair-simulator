@@ -30,17 +30,35 @@ npm start
 기존 6개 조합·리드 저장·병원 소개 흐름입니다.
 
 ### 레퍼런스 헤어
-원하는 헤어스타일 사진을 업로드해, 카메라 속 얼굴·정체성은 유지한 채 헤어만 바꿔 봅니다.
+원하는 헤어스타일 사진을 올리면, 사용자 정면 셀피에 그 헤어를 입힌 **미리보기 이미지**를 만든 뒤 Lucy에 보냅니다. 원본 레퍼런스(연예인 사진 등)는 Decart에 전달하지 않습니다.
 
-1. JPG/PNG/WebP(최대 8MB) 선택 또는 드래그앤드롭
-2. 원본과 전처리(얼굴 보호) 미리보기 확인. 자동 얼굴 감지가 없거나 실패하면 수동 크롭·얼굴 위치를 확정
-3. 카메라 준비 → 헤어 적용 시작 (`lucy-2.5`, anchor 기본 on)
-4. 같은 연결에서 다른 레퍼런스로 교체 가능 (`rt.set`, 120초 타이머 유지)
-5. 결과 캡처 후 PNG 다운로드. 캡처 시 세션·카메라 종료
+1. JPG/PNG/WebP 업로드 → `/hair-describe`로 헤어 요약 생성
+2. 전송 동의 후 로컬 카메라로 정면 촬영(Decart 연결·과금 없음)
+3. `/hair-preview`가 정면+레퍼런스로 미리보기 JPEG 생성 (기본 Gemini)
+4. 미리보기 확인 → **이 스타일로 체험하기** (`enhance: false`, image=미리보기)
+5. 미리보기 실패 시 **텍스트 방식으로 체험하기**로 이어갈 수 있습니다
+6. `/lab?refmode=text`는 미리보기 없이 텍스트만 사용합니다 (일반 경로는 파라미터 무시)
 
-레퍼런스 탭에는 모수 선택·병원 소개 폼이 없습니다. 업로드 이미지는 브라우저 메모리에서만 전처리하며 서버에 영구 저장하지 않습니다. 얼굴 무변형을 100% 보장한다고 표시하지 않습니다.
+업로드·셀피·생성 이미지는 디스크·Drive·로그에 남기지 않습니다.
 
-수동 검증(실제 API 키 필요): 레퍼런스와 사용자 얼굴이 다른 경우, 짧은/긴 머리·앞머리·가르마·컬, 정면/좌우/숙임/표정 변화, 얼굴·피부 변화 여부, 레퍼런스 얼굴·배경 전이, 헤어 경계 안정성.
+## 환경변수
+
+| 변수 | 기본 | 용도 |
+| --- | --- | --- |
+| `DECART_API_KEY` | (없음) | 서버 전용 Decart 키. 브라우저에 내려주지 않습니다. |
+| `ANTHROPIC_API_KEY` | (없음) | 레퍼런스 헤어 묘사. 없으면 `/hair-describe`는 503입니다. |
+| `HAIR_VISION_MODEL` | `claude-haiku-4-5-20251001` | 비전 묘사 모델 |
+| `HAIR_DESCRIBE_DAILY_IP_LIMIT` | 20 | IP당 하루 묘사 횟수 |
+| `HAIR_DESCRIBE_DAILY_TOTAL_LIMIT` | 500 | 전체 하루 묘사 횟수 |
+| `HAIR_EDIT_PROVIDER` | `gemini` | 미리보기 편집 공급자 |
+| `HAIR_EDIT_MODEL` | `gemini-2.5-flash-image` | 미리보기 편집 모델 |
+| `GEMINI_API_KEY` | (없음) | 미리보기 편집. 없으면 `/hair-preview`는 503입니다. |
+| `HAIR_PREVIEW_DAILY_IP_LIMIT` | 10 | IP당 하루 미리보기 횟수 |
+| `HAIR_PREVIEW_DAILY_TOTAL_LIMIT` | 200 | 전체 하루 미리보기 횟수 |
+| `PRIVACY_EDIT_SERVICE` | `Google Gemini` | 동의 문구에 표시할 서비스명 |
+| `PRIVACY_EDIT_REGION` | `국외(미국 등)` | 동의 문구에 표시할 처리 지역 |
+| `TOKEN_DAILY_IP_LIMIT` | 3 | IP당 하루 토큰 |
+| `TOKEN_DAILY_TOTAL_LIMIT` | 100 | 전체 하루 토큰 |
 
 ## 머리 참고 이미지
 
@@ -101,6 +119,8 @@ const queryParams = { self_anchor: "false" };
 
 ## 비용 보호와 제한
 
+- `/hair-describe`: IP당 하루 기본 20회(`HAIR_DESCRIBE_DAILY_IP_LIMIT`), 전체 하루 기본 500회(`HAIR_DESCRIBE_DAILY_TOTAL_LIMIT`). 비전 호출 실패 시 횟수를 복구합니다. 요청 이미지와 스펙 원문은 로그에 남기지 않습니다.
+- `/hair-preview`: IP당 하루 기본 10회(`HAIR_PREVIEW_DAILY_IP_LIMIT`), 전체 하루 기본 200회(`HAIR_PREVIEW_DAILY_TOTAL_LIMIT`). 편집 실패 시 횟수를 복구합니다. 이미지·base64는 로그에 남기지 않습니다.
 - `/token`: IP당 하루 기본 3회(`TOKEN_DAILY_IP_LIMIT`), 전체 하루 기본 100회(`TOKEN_DAILY_TOTAL_LIMIT`). 동일 IP 4번째는 429, 전체 상한은 503과 재시도 안내입니다. 동시 요청도 예약 카운터로 제한하고 토큰 발급 실패는 횟수를 복구합니다.
 - 토큰: 300초 유효, `lucy-2.5`와 `APP_ORIGIN` 제한, `constraints.realtime.maxSessionDuration=120`. 토큰 만료만으로 기존 연결은 종료되지 않으므로 클라이언트 종료와 서버 제약을 함께 적용합니다.
 - 클라이언트: tick 누적 120초 종료, SDK 연결 시작부터 125초 보조 타이머, `visibilitychange`/`pagehide` 종료, 중복 disconnect·종료 로그 방지.

@@ -15,13 +15,15 @@
     "test:browser": "node --test tests/browser.test.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.131.0",
     "@decartai/sdk": "0.2.3",
+    "@google/genai": "1.30.0",
     "@googleapis/drive": "22.0.0",
     "dotenv": "^18.0.5",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "sharp": "0.35.5"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
-    "sharp": "^0.35.5"
+    "@playwright/test": "^1.63.0"
   }
 }

@@ -1,9 +1,10 @@
+import { REFERENCE_ENHANCE } from "./hairPrompt.js";
 import { CAP_SECONDS } from "./shared.js";
 
 /**
  * Decart lucy-2.5 realtime session lifecycle.
  * Preset and reference updates use rt.set() on the same connection (no reconnect).
- * Rapid select() / setHairReference() calls drain to the latest pending state.
+ * Rapid select() / setHairPrompt() calls drain to the latest pending state.
  */
 export class RealtimeSession {
   constructor({
@@ -91,7 +92,7 @@ export class RealtimeSession {
 
   /**
    * Apply a full SetInput on the live session.
-   * `force` applies even when the logical key matches (needed for reference image swaps).
+   * `force` applies even when the logical key matches (needed for reference prompt swaps).
    */
   async select(key, state, { force = false } = {}) {
     if (this.stopped || !this.rt || !["connected", "generating"].includes(this.state)) return false;
@@ -122,8 +123,15 @@ export class RealtimeSession {
     return this.settingPromise;
   }
 
-  /** Same-session reference image update. Always forces set() via a new revision key. */
-  async setHairReference(image, prompt, { enhance = true } = {}) {
+  /** Same-session reference prompt update. Always forces set() via a new revision key. Never sends image. */
+  async setHairPrompt(prompt, { enhance = REFERENCE_ENHANCE } = {}) {
+    const revision = ++this.revision;
+    const key = `reference:${revision}`;
+    return this.select(key, { prompt, enhance }, { force: true });
+  }
+
+  /** Same-session reference preview-image update. Always forces set() via a new revision key. */
+  async setHairReference(image, prompt, { enhance = REFERENCE_ENHANCE } = {}) {
     const revision = ++this.revision;
     const key = `reference:${revision}`;
     return this.select(key, { prompt, image, enhance }, { force: true });

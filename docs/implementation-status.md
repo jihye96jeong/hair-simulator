@@ -4,7 +4,7 @@
 
 참고 클론 `change_ai/`(요청문의 `change_ai-main`에 해당, 수정하지 않음)의 카메라·토큰·세션 패턴을 STEP 01 범위에 맞춰 현재 스택에 재정렬했습니다. 카메라 ideal은 `models.realtime("lucy-2.5")` width/height/fps, 토큰 `expiresIn: 300`, 같은 연결에서 `set()` 전환(빠른 클릭은 최신 선택 유지)입니다.
 
-추가로 **레퍼런스 헤어** 탭을 넣었습니다. `change_ai`의 `hairReference` 전처리·헤어 전용 프롬프트·같은 세션 이미지 교체를 가져와, FaceDetector 실패 시 수동 얼굴 보호와 `experienceType: reference` 종료 기록을 보강했습니다. 기존 모수 탭·리드·Drive 흐름은 유지합니다.
+추가로 **레퍼런스 헤어**는 원본 레퍼런스를 Lucy에 보내지 않습니다. `/hair-describe`로 텍스트 스펙을 만들고, 사용자 정면 셀피와 레퍼런스로 `/hair-preview`(Gemini 이미지 편집) 미리보기를 만든 뒤, Lucy에는 `{ prompt(withImage), enhance:false, image:미리보기 }`만 보냅니다. 미리보기 실패 시 텍스트 전용 경로로 이어갈 수 있습니다. 업로드·셀피·생성 이미지는 저장하지 않습니다.
 
 ## 구현 파일
 
@@ -16,7 +16,8 @@
 | `lib/browser-vendor.js` | SDK·의존성을 CDN·빌드 없이 제공 |
 | `lib/assets.js`, `scripts/create-placeholders.js`, `public/assets/*` | 헤어라인·정수리 PNG 원본 6장, 예비 이미지 생성, 실제 에셋 감지 |
 | `public/index.html`, `styles.css`, `app.js` | 탭 UI, 모수 흐름, `/lab` 검증 흐름 |
-| `public/hairReference.js`, `referenceFlow.js` | 레퍼런스 전처리·수동 보호·레퍼런스 탭 수명주기 |
+| `public/hairPrompt.js`, `hairReference.js`, `referenceFlow.js`, `selfie.js` | 헤어 스펙·프롬프트, 업로드 축소, 셀피, 미리보기·체험 수명주기 |
+| `lib/hair-vision.js`, `lib/hair-editor.js` | Anthropic 묘사, Gemini 헤어 미리보기 편집 |
 | `public/combos.js`, `shared.js`, `session.js`, `camera.js`, `capture.js` | 조합·세션·카메라·캡처 |
 | `scripts/check-prompts.js`, `scripts/setup-google.js` | 프롬프트 검사, Drive 폴더 확인 |
 | `tests/*.test.js`, `tests/browser.test.mjs` | HTTP·세션·레퍼런스·Chrome 검증 |
@@ -48,7 +49,7 @@ Google Drive 연동과 유료 연결은 자격증명 없이 대역으로 검증�
 
 실행 환경은 Node 24.2.0이며, 의존성의 Node 20 지원 조건에 맞춰 최소 버전은 20.9.0입니다. 이미지 저장은 Drive 전용 패키지 `@googleapis/drive` 22를 사용합니다. 프롬프트·HTTP·세션·Drive·Chrome 검증을 아래 명령으로 실행합니다.
 
-정수리·레퍼런스 탭 검증: Node 테스트와 Chrome 브라우저 테스트를 실행합니다. 레퍼런스 업로드 검증, 수동/자동 얼굴 보호, 같은 연결 `setHairReference`, 탭 전환 cleanup, `experienceType: reference` 종료 기록을 대역으로 확인했습니다. 실제 Decart 변환 품질·얼굴 보존은 API 키 기반 수동 확인이 남습니다.
+정수리·레퍼런스 탭 검증: 업로드 → 동의 → 셀피 → `/hair-preview` → Lucy `initialState.image`가 미리보기 바이트와 일치하고 원본 레퍼런스와 다름, 미리보기 실패 시 텍스트 대체(image 없음), 레퍼런스 교체 후 이전 미리보기 무효화를 대역으로 확인했습니다. 실제 Gemini·Decart 품질은 API 키 기반 수동 확인이 남습니다.
 
 ```bash
 npm run check:prompts

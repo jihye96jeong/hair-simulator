@@ -7,6 +7,7 @@ import { once } from "node:events";
 import { createApp } from "../server.js";
 import { readConfig } from "../lib/config.js";
 import { DailyQuota } from "../lib/quota.js";
+import { buildHairPrompt, describeHairKo } from "../public/hairPrompt.js";
 
 const clock = Date.parse("2026-10-01T06:00:00Z");
 const quiet = { error() {} };
@@ -15,9 +16,11 @@ async function fixture(t, options = {}) {
   const leads = [];
   const scopes = [];
   const config = readConfig({ APP_ORIGIN: "http://localhost:3000", ...options.env });
-  const app = await createApp({ config, now: () => clock, logger: quiet,
+  const app = await createApp({ config, now: () => clock, logger: options.logger || quiet,
     decart: options.decart || { tokens: { create: async (input) => { creates++; scopes.push(input); return { apiKey: "temporary-client-token" }; } } },
     store: options.store || { saveLead: async (lead, id) => { leads.push({ lead, id }); return { imageFileId: "private-file" }; } },
+    hairVision: options.hairVision,
+    hairEditor: options.hairEditor,
   });
   const server = await new Promise((resolve, reject) => { const s = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve(s)); s.on("error", reject); });
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -36,6 +39,7 @@ test("serves the UI, local SDK and config without server secrets", async (t) => 
   assert.equal((await fetch(`${f.base}/vendor/retry.js`)).status, 200);
   const config = await (await fetch(`${f.base}/config`)).json();
   assert.ok(!("decartKey" in config));
+  assert.ok(!("anthropicKey" in config));
   assert.deepEqual(config.assets, { partial: true, "1k": true, "2k": true, crown_partial: true, crown_1k: true, crown_2k: true });
   assert.equal((await fetch(`${f.base}/.env`)).status, 404);
   assert.equal((await fetch(`${f.base}/server.js`)).status, 404);
@@ -136,4 +140,123 @@ test("CLI entry point starts the app and serves the page without configured keys
   ]);
   assert.equal((await fetch(`http://127.0.0.1:${port}`)).status, 200);
   assert.equal((await fetch(`http://127.0.0.1:${port}/token`, { method: "POST" })).status, 500);
+});
+
+const visibleSpec = {
+  hairVisible: true,
+  length: "shoulder",
+  cut: "layered cut",
+  bangs: "see_through",
+  part: "none",
+  texture: "s_wave",
+  volume: "natural",
+  color: "ash brown",
+};
+
+async function jpegDataUrl() {
+  const image = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#654" } }).jpeg().toBuffer();
+  return `data:image/jpeg;base64,${image.toString("base64")}`;
+}
+
+test("/hair-describe returns prompt text and rejects bad inputs without leaking images", async (t) => {
+  const logs = [];
+  const logger = { error: (...args) => logs.push(args), info: (...args) => logs.push(args) };
+  const f = await fixture(t, {
+    logger,
+    env: { HAIR_DESCRIBE_DAILY_IP_LIMIT: "2", HAIR_DESCRIBE_DAILY_TOTAL_LIMIT: "10" },
+    hairVision: { describe: async () => ({ ok: true, spec: visibleSpec }) },
+  });
+  const image = await jpegDataUrl();
+  const ok = await f.post("/hair-describe", { image });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await ok.json(), { spec: visibleSpec, prompt: buildHairPrompt(visibleSpec), summary: describeHairKo(visibleSpec) });
+  assert.ok(!JSON.stringify(logs).includes(image.slice(30, 80)));
+  assert.ok(!JSON.stringify(logs).includes("base64"));
+
+  const hidden = await fixture(t, { hairVision: { describe: async () => ({ ok: true, spec: { ...visibleSpec, hairVisible: false } }) } });
+  assert.equal((await hidden.post("/hair-describe", { image: await jpegDataUrl() })).status, 422);
+
+  const badSpec = await fixture(t, { hairVision: { describe: async () => ({ ok: false, error: "invalid-spec" }) } });
+  assert.equal((await badSpec.post("/hair-describe", { image: await jpegDataUrl() })).status, 502);
+
+  const none = await fixture(t, { hairVision: null });
+  assert.equal((await none.post("/hair-describe", { image: await jpegDataUrl() })).status, 503);
+
+  assert.equal((await f.post("/hair-describe", { image: "not-image" })).status, 400);
+  assert.equal((await f.post("/hair-describe", { image: "data:image/gif;base64,AAAA" })).status, 400);
+  const huge = `data:image/jpeg;base64,${Buffer.alloc(2 * 1024 * 1024 + 1).toString("base64")}`;
+  assert.equal((await f.post("/hair-describe", { image: huge })).status, 413);
+});
+
+test("/hair-describe quota rejects a second success and vision failure releases the reservation", async (t) => {
+  const logs = [];
+  let fail = true;
+  const f = await fixture(t, {
+    env: { HAIR_DESCRIBE_DAILY_IP_LIMIT: "1" },
+    logger: { error: (...args) => logs.push(args.join(" ")), info() {} },
+    hairVision: {
+      describe: async () => {
+        if (fail) throw new Error("secret-vision-trace");
+        return { ok: true, spec: visibleSpec };
+      },
+    },
+  });
+  const image = await jpegDataUrl();
+  const first = await f.post("/hair-describe", { image });
+  assert.equal(first.status, 502);
+  assert.ok(!logs.join(" ").includes("secret-vision-trace"));
+  fail = false;
+  assert.equal((await f.post("/hair-describe", { image })).status, 200);
+  assert.equal((await f.post("/hair-describe", { image })).status, 429);
+});
+
+test("/hair-preview returns jpeg and rejects bad inputs without leaking images", async (t) => {
+  const logs = [];
+  const previewJpeg = await sharp({ create: { width: 16, height: 16, channels: 3, background: "#0af" } }).jpeg().toBuffer();
+  const f = await fixture(t, {
+    logger: { error: (...args) => logs.push(args), info: (...args) => logs.push(args) },
+    env: { HAIR_PREVIEW_DAILY_IP_LIMIT: "2" },
+    hairEditor: { edit: async () => ({ buffer: previewJpeg, mediaType: "image/jpeg" }) },
+  });
+  const person = await jpegDataUrl();
+  const reference = await jpegDataUrl();
+  const ok = await f.post("/hair-preview", { person, reference });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get("cache-control"), "no-store");
+  const body = await ok.json();
+  assert.match(body.image, /^data:image\/jpeg;base64,/);
+  assert.ok(!JSON.stringify(logs).includes(person.slice(30, 80)));
+  assert.ok(!JSON.stringify(logs).includes("base64"));
+
+  const none = await fixture(t, { hairEditor: null });
+  assert.equal((await none.post("/hair-preview", { person: await jpegDataUrl(), reference: await jpegDataUrl() })).status, 503);
+
+  assert.equal((await f.post("/hair-preview", { person: "x", reference })).status, 400);
+  assert.equal((await f.post("/hair-preview", { person, reference: "data:image/gif;base64,AAAA" })).status, 400);
+  const huge = `data:image/jpeg;base64,${Buffer.alloc(Math.floor(1.2 * 1024 * 1024) + 1).toString("base64")}`;
+  assert.equal((await f.post("/hair-preview", { person: huge, reference })).status, 413);
+});
+
+test("/hair-preview quota releases on failure and rejects a second success", async (t) => {
+  const logs = [];
+  let fail = true;
+  const previewJpeg = await sharp({ create: { width: 8, height: 8, channels: 3, background: "#123" } }).jpeg().toBuffer();
+  const f = await fixture(t, {
+    env: { HAIR_PREVIEW_DAILY_IP_LIMIT: "1" },
+    logger: { error: (...args) => logs.push(args.join(" ")), info() {} },
+    hairEditor: {
+      edit: async () => {
+        if (fail) throw new Error("secret-edit-trace");
+        return { buffer: previewJpeg, mediaType: "image/jpeg" };
+      },
+    },
+  });
+  const person = await jpegDataUrl();
+  const reference = await jpegDataUrl();
+  assert.equal((await f.post("/hair-preview", { person, reference })).status, 502);
+  assert.ok(!logs.join(" ").includes("secret-edit-trace"));
+  fail = false;
+  assert.equal((await f.post("/hair-preview", { person, reference })).status, 200);
+  assert.equal((await f.post("/hair-preview", { person, reference })).status, 429);
 });

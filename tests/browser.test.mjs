@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { access } from "node:fs/promises";
+import { access, mkdir } from "node:fs/promises";
 import { chromium, expect } from "@playwright/test";
 import sharp from "sharp";
 import { createApp } from "../server.js";
 import { readConfig } from "../lib/config.js";
+import { buildHairPrompt } from "../public/hairPrompt.js";
 
 const fakeSdk = `
 export const noopLogger = {debug(){}, info(){}, warn(){}, error(){}};
@@ -45,15 +46,64 @@ async function launch() {
   return chromium.launch(options);
 }
 
-test("browser: Try-On hair panel, reference connect/swap, preset flow", { timeout: 60000 }, async (t) => {
+const describeSpec = {
+  hairVisible: true,
+  length: "shoulder",
+  cut: "layered cut",
+  bangs: "see_through",
+  part: "none",
+  texture: "s_wave",
+  volume: "natural",
+  color: "ash brown",
+};
+
+const FORBIDDEN_REF_BUTTONS = [
+  "이 스타일로 체험하기",
+  "다시 만들기",
+  "촬영",
+  "다시 촬영",
+  "연결",
+  "끊기",
+  "준비",
+];
+
+async function visibleActionLabels(page) {
+  return page.locator("#stage button:visible, #ref-bottom button:visible, #preset-actions button:visible").allTextContents();
+}
+
+async function assertNoForbidden(page) {
+  const labels = await visibleActionLabels(page);
+  for (const bad of FORBIDDEN_REF_BUTTONS) {
+    assert.equal(labels.includes(bad), false, `unexpected button visible: ${bad}`);
+  }
+}
+
+async function waitLive(page) {
+  await expect(page.locator("#ref-layer-capture")).toBeVisible({ timeout: 10000 });
+  await expect(page.locator("#ref-live-bar")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#ref-capture")).toBeEnabled({ timeout: 15000 });
+}
+
+test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 180000 }, async (t) => {
   const config = readConfig({ SIMULATOR_MODE: "ref", TOKEN_DAILY_IP_LIMIT: "20" });
   const leads = [];
   let issued = 0;
+  let previewCalls = 0;
+  let failPreview = false;
+  const previewJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 10, g: 200, b: 40 } } }).jpeg().toBuffer();
   const app = await createApp({
     config,
     logger: { error() {} },
     decart: { tokens: { create: async () => { issued++; return { apiKey: "test-client-token" }; } } },
     store: { saveLead: async (lead) => { leads.push(lead); return { imageFileId: "test-file" }; } },
+    hairVision: { describe: async () => ({ ok: true, spec: describeSpec }) },
+    hairEditor: {
+      edit: async () => {
+        previewCalls++;
+        if (failPreview) throw new Error("preview fail");
+        return { buffer: previewJpeg, mediaType: "image/jpeg" };
+      },
+    },
   });
   const server = await new Promise((resolve, reject) => {
     const s = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve(s));
@@ -70,50 +120,107 @@ test("browser: Try-On hair panel, reference connect/swap, preset flow", { timeou
   await page.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
   await page.goto(base);
 
-  // Exact Try-On chrome: hair mode first, one screen.
   await expect(page.locator("header h1")).toHaveText("Try-On");
   await expect(page.locator("#tab-reference")).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#stage-label")).toContainText("연결을 누르면 카메라가 켜집니다");
-  await expect(page.locator("#drop-label")).toContainText("상품 이미지를 여기에 놓으세요");
-  await expect(page.locator("#connect")).toHaveText("연결");
-  await expect(page.locator("#disconnect")).toHaveText("끊기");
-  await expect(page.locator("main > p.fine")).toContainText("초당 $0.02");
+  await expect(page.locator("#ref-layer-idle")).toBeVisible();
+  await expect(page.locator("#ref-ready-bar")).toBeHidden();
+  await assertNoForbidden(page);
 
-  // Invalid file
+  // Bad file → stage banner
   await page.locator("#ref-file").setInputFiles({ name: "bad.gif", mimeType: "image/gif", buffer: Buffer.from([1, 2, 3]) });
-  await expect(page.locator("#error")).toContainText("JPG, PNG, WebP");
+  await expect(page.locator("#ref-stage-message")).toContainText("JPG, PNG, WebP");
 
-  // Upload + connect (reference)
-  const png = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 120, g: 90, b: 60 } } }).png().toBuffer();
-  await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: png });
-  if (await page.locator("#ref-manual").isVisible()) await page.locator("#ref-confirm-manual").click();
-  await expect(page.locator("#connect")).toBeEnabled({ timeout: 15000 });
-  assert.equal(issued, 0);
-  await page.locator("#connect").click();
-  await expect(page.locator("#ref-capture")).toBeEnabled();
+  // Upload → ready (user action 1)
+  let clicks = 0;
+  const refPng = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 120, g: 90, b: 60 } } }).png().toBuffer();
+  await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: refPng });
+  clicks += 1;
+  await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+  await expect(page.locator("#ref-ready-thumb")).toBeVisible();
+  await expect(page.locator("#ref-ready-bar")).toBeVisible();
+  await expect(page.locator("#ref-start")).toBeDisabled();
+  await expect(page.locator("#ref-summary")).toBeHidden();
+  await assertNoForbidden(page);
+
+  // Consent (user action 2) + start (user action 3)
+  await page.locator("#ref-consent-check").check();
+  clicks += 1;
+  await expect(page.locator("#ref-start")).toBeEnabled();
+  await page.locator("#ref-start").click();
+  clicks += 1;
+  assert.ok(clicks <= 3, `user clicks should be ≤3, got ${clicks}`);
+  assert.equal(issued, 0, "must not connect Decart before preview finishes");
+
+  await waitLive(page);
+  assert.equal(previewCalls, 1);
   assert.equal(issued, 1);
-  const initial = await page.evaluate(() => ({
+  await expect(page.locator("#ref-live-thumb")).toBeVisible();
+  await expect(page.locator("#remaining")).toBeVisible();
+  await assertNoForbidden(page);
+  const liveLabels = await visibleActionLabels(page);
+  assert.deepEqual(liveLabels.filter((t) => ["캡처", "종료"].includes(t)).sort(), ["캡처", "종료"].sort());
+
+  const initial = await page.evaluate(async () => {
+    const image = window.__options.initialState.image;
+    const buf = image ? new Uint8Array(await image.arrayBuffer()) : null;
+    return {
+      hasImage: "image" in window.__options.initialState,
+      enhance: window.__options.initialState.prompt.enhance,
+      prompt: window.__options.initialState.prompt.text,
+      imageBytes: buf ? Array.from(buf) : null,
+    };
+  });
+  assert.equal(initial.hasImage, true);
+  assert.equal(initial.enhance, false);
+  assert.equal(initial.prompt, buildHairPrompt(describeSpec, { withImage: true }));
+  assert.deepEqual(initial.imageBytes, Array.from(previewJpeg));
+  assert.notDeepEqual(initial.imageBytes, Array.from(refPng));
+
+  // Same photo retry → no second /hair-preview
+  await page.locator("#ref-end").click();
+  await expect(page.locator("#ref-layer-ready")).toBeVisible();
+  await expect(page.locator("#ref-consent-check")).toBeChecked();
+  await page.locator("#ref-start").click();
+  await waitLive(page);
+  assert.equal(previewCalls, 1, "same reference must reuse preview");
+  assert.equal(issued, 2);
+  await page.locator("#ref-end").click();
+
+  // New photo → preview again
+  const ref2 = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 20, g: 20, b: 200 } } }).png().toBuffer();
+  await page.locator("#ref-file").setInputFiles({ name: "style2.png", mimeType: "image/png", buffer: ref2 });
+  await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+  await page.locator("#ref-consent-check").check();
+  await page.locator("#ref-start").click();
+  await waitLive(page);
+  assert.equal(previewCalls, 2, "new reference must remake preview");
+  await page.locator("#ref-end").click();
+
+  // Two consecutive preview failures → simple mode
+  failPreview = true;
+  const ref3 = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 200, g: 40, b: 40 } } }).png().toBuffer();
+  await page.locator("#ref-file").setInputFiles({ name: "style3.png", mimeType: "image/png", buffer: ref3 });
+  await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+  await page.locator("#ref-consent-check").check();
+  await page.locator("#ref-start").click();
+  await expect(page.locator("#ref-stage-message")).toContainText("스타일을 입히지 못했어요", { timeout: 20000 });
+  await expect(page.locator("#ref-stage-action")).toHaveText("다시 시도");
+  assert.equal(issued, 3); // previous success only; no token on fail
+  await page.locator("#ref-stage-action").click();
+  await expect(page.locator("#ref-stage-action")).toHaveText("간단 모드로 체험", { timeout: 20000 });
+  await page.locator("#ref-stage-action").click();
+  await expect(page.locator("#ref-live-bar")).toBeVisible({ timeout: 20000 });
+  const textInitial = await page.evaluate(() => ({
     hasImage: "image" in window.__options.initialState,
     prompt: window.__options.initialState.prompt.text,
     enhance: window.__options.initialState.prompt.enhance,
-    token: window.__clientKey,
   }));
-  assert.equal(initial.hasImage, true);
-  assert.equal(initial.enhance, true);
-  assert.match(initial.prompt, /Change only the hair/);
-  assert.equal(initial.token, "test-client-token");
+  assert.equal(textInitial.hasImage, false);
+  assert.equal(textInitial.enhance, false);
+  assert.equal(textInitial.prompt, buildHairPrompt(describeSpec, { withImage: false }));
+  await page.locator("#ref-end").click();
 
-  // Same-session swap
-  const png2 = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 40, g: 40, b: 40 } } }).png().toBuffer();
-  await page.locator("#ref-replace-file").setInputFiles({ name: "style2.png", mimeType: "image/png", buffer: png2 });
-  if (await page.locator("#ref-manual").isVisible()) await page.locator("#ref-confirm-manual").click();
-  await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(0);
-  assert.equal(issued, 1);
-
-  await page.locator("#disconnect").click();
-  await expect(page.locator("#status")).toContainText("끊");
-
-  // Preset mode on the same screen
+  // Preset mode regression
   await page.locator("#tab-preset").click();
   await expect(page.locator("#preset-bar")).toBeVisible();
   await expect(page.locator("#drop")).toBeHidden();
@@ -122,18 +229,13 @@ test("browser: Try-On hair panel, reference connect/swap, preset flow", { timeou
   await expect(page.locator('#preset-bar [data-combo="crown_1k"]')).toHaveAttribute("aria-pressed", "true");
   await page.locator("#connect").click();
   await expect(page.locator("#save-result")).toBeEnabled();
-  assert.equal(issued, 2);
   await page.locator('#preset-bar [data-combo="crown_2k"]').click();
   await expect(page.locator("#combo-label")).toHaveText("정수리 · 2천 모");
-  assert.equal(issued, 2, "density switch reuses connection");
-
-  // Failed set keeps selection
   await page.evaluate(() => { window.__rejectSet = true; });
   await page.locator('#preset-bar [data-area="hairline"]').click();
   await expect(page.locator("#error")).toContainText("헤어 참고 이미지 변경에 실패");
   await expect(page.locator('#preset-bar [data-area="crown"]')).toHaveAttribute("aria-pressed", "true");
   await page.evaluate(() => { window.__rejectSet = false; });
-
   await page.locator("#save-result").click();
   await expect(page.locator("#contact")).toBeVisible();
   await page.locator("#name").fill("테스트");
@@ -146,7 +248,6 @@ test("browser: Try-On hair panel, reference connect/swap, preset flow", { timeou
   assert.equal(leads[0].area, "crown");
   assert.equal(leads[0].density, "2k");
 
-  // Native SDK import still works
   const nativePage = await context.newPage();
   await nativePage.goto(base);
   const native = await nativePage.evaluate(async () => {
@@ -154,4 +255,94 @@ test("browser: Try-On hair panel, reference connect/swap, preset flow", { timeou
     return sdk.models.realtime("lucy-2.5").name;
   });
   assert.equal(native, "lucy-2.5");
+});
+
+test("browser: reference UI state screenshots", { timeout: 120000 }, async (t) => {
+  const config = readConfig({ SIMULATOR_MODE: "ref", TOKEN_DAILY_IP_LIMIT: "20" });
+  const previewJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 10, g: 200, b: 40 } } }).jpeg().toBuffer();
+  const app = await createApp({
+    config,
+    logger: { error() {} },
+    decart: { tokens: { create: async () => ({ apiKey: "shot-token" }) } },
+    store: { saveLead: async () => ({ imageFileId: "x" }) },
+    hairVision: { describe: async () => ({ ok: true, spec: describeSpec }) },
+    hairEditor: { edit: async () => ({ buffer: previewJpeg, mediaType: "image/jpeg" }) },
+  });
+  const server = await new Promise((resolve, reject) => {
+    const s = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve(s));
+    s.on("error", reject);
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  config.origin = base;
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const outDir = new URL("../tmp/ref-ui-shots/", import.meta.url);
+  await mkdir(outDir, { recursive: true });
+
+  const browser = await launch();
+  t.after(() => browser.close());
+
+  async function shot(name, width, height, run) {
+    const context = await browser.newContext({ viewport: { width, height }, permissions: ["camera"] });
+    const page = await context.newPage();
+    await page.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
+    await page.goto(base);
+    await run(page);
+    await page.screenshot({ path: new URL(`${name}.png`, outDir).pathname, fullPage: false });
+    await context.close();
+  }
+
+  const refPng = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 120, g: 90, b: 60 } } }).png().toBuffer();
+
+  await shot("01-idle-mobile", 375, 812, async (page) => {
+    await expect(page.locator("#ref-layer-idle")).toBeVisible();
+  });
+  await shot("01-idle-desktop", 480, 900, async (page) => {
+    await expect(page.locator("#ref-layer-idle")).toBeVisible();
+  });
+
+  await shot("02-ready-mobile", 375, 812, async (page) => {
+    await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: refPng });
+    await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+  });
+  await shot("02-ready-desktop", 480, 900, async (page) => {
+    await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: refPng });
+    await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+  });
+
+  await shot("03-capture-mobile", 375, 812, async (page) => {
+    await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: refPng });
+    await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+    await page.locator("#ref-consent-check").check();
+    await page.locator("#ref-start").click();
+    await expect(page.locator("#ref-layer-capture")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator("#ref-countdown")).toBeVisible({ timeout: 5000 });
+  });
+
+  await shot("04-generating-mobile", 375, 812, async (page) => {
+    await page.route("**/hair-preview", async (route) => {
+      await new Promise((r) => setTimeout(r, 2500));
+      await route.continue();
+    });
+    await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: refPng });
+    await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+    await page.locator("#ref-consent-check").check();
+    await page.locator("#ref-start").click();
+    await expect(page.locator("#ref-layer-generating")).toBeVisible({ timeout: 15000 });
+  });
+
+  await shot("05-live-mobile", 375, 812, async (page) => {
+    await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: refPng });
+    await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+    await page.locator("#ref-consent-check").check();
+    await page.locator("#ref-start").click();
+    await expect(page.locator("#ref-live-bar")).toBeVisible({ timeout: 30000 });
+  });
+  await shot("05-live-desktop", 480, 900, async (page) => {
+    await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: refPng });
+    await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+    await page.locator("#ref-consent-check").check();
+    await page.locator("#ref-start").click();
+    await expect(page.locator("#ref-live-bar")).toBeVisible({ timeout: 30000 });
+  });
 });

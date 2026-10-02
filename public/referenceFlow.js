@@ -1,80 +1,157 @@
-import {
-  REFERENCE_HAIR_PROMPT,
-  analyzeReference,
-  cropFromManual,
-  faceFromManual,
-  processReference,
-  validateReferenceFile,
-} from "./hairReference.js";
+import { decodeReferenceBitmap, downscaleBitmap, toUploadDataUrl, validateReferenceFile } from "./hairReference.js";
+import { REFERENCE_ENHANCE, buildHairPrompt } from "./hairPrompt.js";
 import { CAP_SECONDS, REFERENCE_SESSION_KEY } from "./shared.js";
 import { RealtimeSession } from "./session.js";
 import { openFrontCamera, stopMediaStream } from "./camera.js";
 import { captureFrame, downloadCapture } from "./capture.js";
+import { createSelfieCapture } from "./selfie.js";
 
 const $ = (id) => document.getElementById(id);
 
-/** Try-On panel–identical reference hair controller (one screen). */
+const STATES = Object.freeze(["idle", "ready", "capture", "generating", "live"]);
+
+/** Simplified reference hair UI: upload → start → auto capture/preview → Lucy. */
 export function createReferenceFlow({
   isActive,
   reportEnd,
   onGlobalError,
   getAnchor = () => "on",
-  getSharedEls,
+  getPrivacy = () => ({}),
+  isLab = false,
+  getRefMode = () => "preview",
 }) {
+  let uiState = "idle";
   let camera = null;
   let cameraEpoch = 0;
   let session = null;
   let connecting = false;
-  let switching = false;
   let uploadSeq = 0;
-  let applySeq = 0;
-  let analysis = null;
+  let runSeq = 0;
   let originalUrl = null;
-  let processedBlob = null;
-  let protectedReady = false;
+  let referenceDataUrl = "";
+  let hairSpec = null;
+  let hairPromptText = "";
+  let describePromise = null;
+  let describeReady = false;
+  let describeError = null;
+  let selfieDataUrl = "";
+  let previewBlob = null;
+  let previewDataUrl = "";
+  let previewFailCount = 0;
+  let consented = false;
+  let detailOpen = false;
+  let countdownTimer = null;
   let captureCanvas = null;
 
-  function els() {
-    return getSharedEls ? getSharedEls() : {
-      video: $("output"),
-      label: $("stage-label"),
-      status: $("status"),
-      connect: $("connect"),
-      disconnect: $("disconnect"),
-    };
-  }
+  const selfie = createSelfieCapture({
+    video: $("selfie-video"),
+    overlay: $("selfie-guide"),
+  });
 
-  function setError(message) { onGlobalError(message); }
-  function setStatus(message) { els().status.textContent = message; $("ref-status").textContent = message; }
+  function textMode() { return isLab && getRefMode() === "text"; }
   function revoke(url) { if (url) URL.revokeObjectURL(url); }
+  function setGlobalError(message) { onGlobalError(message); }
 
-  function showLabel(on, text) {
-    const label = els().label;
-    if (text) label.textContent = text;
-    label.hidden = !on;
+  function hideBanner() {
+    $("ref-stage-banner").hidden = true;
+    $("ref-stage-message").textContent = "";
+    $("ref-stage-action").hidden = true;
+    $("ref-stage-action").onclick = null;
   }
 
-  function clearVideo() {
-    const video = els().video;
-    video.srcObject = null;
-    video.hidden = true;
-    showLabel(true, "연결을 누르면 카메라가 켜집니다");
+  function showBanner(message, actionLabel, onAction) {
+    $("ref-stage-banner").hidden = false;
+    $("ref-stage-message").textContent = message;
+    if (actionLabel && onAction) {
+      $("ref-stage-action").hidden = false;
+      $("ref-stage-action").textContent = actionLabel;
+      $("ref-stage-action").onclick = () => onAction();
+    } else {
+      $("ref-stage-action").hidden = true;
+      $("ref-stage-action").onclick = null;
+    }
+  }
+
+  function updateConsentCopy() {
+    const privacy = getPrivacy() || {};
+    const service = privacy.editService || "외부 AI 서비스";
+    const region = privacy.editRegion || "";
+    $("ref-consent-extra").textContent = region
+      ? `전송 대상: ${service}. 처리 지역: ${region}. 사진은 저장하지 않습니다.`
+      : `전송 대상: ${service}. 사진은 저장하지 않습니다.`;
+  }
+
+  function clearCountdown() {
+    if (countdownTimer) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+    $("ref-countdown").hidden = true;
+  }
+
+  function setUiState(next) {
+    uiState = next;
+    const map = {
+      idle: "ref-layer-idle",
+      ready: "ref-layer-ready",
+      capture: "ref-layer-capture",
+      generating: "ref-layer-generating",
+    };
+    for (const [state, id] of Object.entries(map)) $(id).hidden = state !== next;
+    $("output").hidden = next !== "live";
+    $("ref-live-thumb").hidden = next !== "live" || !originalUrl;
+    $("ref-ready-bar").hidden = next !== "ready";
+    $("ref-live-bar").hidden = next !== "live";
+    $("remaining").hidden = next !== "live";
+    $("time-bar").hidden = next !== "live";
     $("connection-state").hidden = true;
     $("expected-chip").hidden = true;
-    $("remaining").hidden = true;
     $("resolution").hidden = true;
-    $("combo-label").hidden = true;
-    $("ref-live-actions").hidden = true;
-    $("time-bar").hidden = true;
+    if (next === "capture" || next === "generating" || next === "live") hideBanner();
+    updateButtons();
   }
 
-  function showStream(stream, { remote = false } = {}) {
-    const video = els().video;
-    video.hidden = false;
-    video.srcObject = stream;
-    video.style.transform = remote ? "none" : "scaleX(-1)";
-    showLabel(false);
-    void video.play().catch(() => undefined);
+  function invalidatePreview() {
+    previewBlob = null;
+    previewDataUrl = "";
+    previewFailCount = 0;
+  }
+
+  function resetDescribe() {
+    describePromise = null;
+    describeReady = false;
+    describeError = null;
+    hairSpec = null;
+    hairPromptText = "";
+  }
+
+  function clearUpload({ keepConsent = false } = {}) {
+    uploadSeq++;
+    runSeq++;
+    clearCountdown();
+    selfie.stop();
+    stopCamera();
+    if (session && !session.stopped) session.stop("manual");
+    session = null;
+    connecting = false;
+    revoke(originalUrl);
+    originalUrl = null;
+    referenceDataUrl = "";
+    selfieDataUrl = "";
+    invalidatePreview();
+    resetDescribe();
+    $("ref-ready-thumb").removeAttribute("src");
+    $("ref-live-thumb").removeAttribute("src");
+    $("ref-freeze").removeAttribute("src");
+    $("ref-file").value = "";
+    if (!keepConsent) {
+      consented = false;
+      $("ref-consent-check").checked = false;
+      detailOpen = false;
+      $("ref-consent-extra").hidden = true;
+    }
+    setGlobalError("");
+    setUiState("idle");
   }
 
   function stopCamera() {
@@ -83,272 +160,216 @@ export function createReferenceFlow({
     camera = null;
   }
 
-  function clearUpload() {
-    uploadSeq++;
-    applySeq++;
-    if (analysis?.bitmap) {
-      try { analysis.bitmap.close(); } catch { /* ignore */ }
-    }
-    analysis = null;
-    processedBlob = null;
-    protectedReady = false;
-    revoke(originalUrl);
-    originalUrl = null;
-    $("ref").removeAttribute("src");
-    $("ref").hidden = true;
-    $("clear").hidden = true;
-    $("drop-label").textContent = "상품 이미지를 여기에 놓으세요";
-    $("ref-file").value = "";
-    $("ref-replace-file").value = "";
-    $("ref-manual").hidden = true;
-    setStatus("이미지를 고른 뒤 연결을 누르세요.");
-    updateButtons();
-  }
-
-  function stopLive(reason = "manual") {
-    if (session && !session.stopped) session.stop(reason);
-    else {
-      stopCamera();
-      if (isActive()) clearVideo();
-    }
-  }
-
-  function dispose() {
-    stopLive("manual");
-    stopCamera();
-    clearUpload();
-    captureCanvas = null;
-    setError("");
-    if (isActive()) clearVideo();
-  }
-
-  function updateButtons() {
-    const live = !session?.stopped && Boolean(session?.rt) && ["connected", "generating"].includes(session?.state);
-    const frame = live && els().video.readyState >= 2 && els().video.videoWidth > 0;
-    const { connect, disconnect } = els();
-    if (isActive()) {
-      connect.disabled = !protectedReady || !processedBlob || connecting || live;
-      disconnect.disabled = !(live || camera || connecting);
-    }
-    $("clear").hidden = !analysis;
-    $("ref-replace").disabled = !live || connecting || switching;
-    $("ref-capture").disabled = !frame || connecting || switching;
-    $("ref-connect").disabled = connect.disabled;
-    $("ref-disconnect").disabled = disconnect.disabled;
-    $("ref-prepare").disabled = connect.disabled;
-    $("ref-start").disabled = connect.disabled;
+  function showLiveStream(stream, { remote = false } = {}) {
+    const video = $("output");
+    video.hidden = false;
+    video.srcObject = stream;
+    video.style.transform = remote ? "none" : "scaleX(-1)";
+    void video.play().catch(() => undefined);
   }
 
   function updateTime(billed, wall) {
     const remaining = Math.max(0, CAP_SECONDS - Math.max(billed, wall));
     $("remaining").textContent = `${Math.ceil(remaining)}초 남음`;
     $("time-bar").value = remaining;
-    $("ref-remaining").textContent = $("remaining").textContent;
-    $("ref-time-bar").value = remaining;
   }
 
-  function updateResolution() {
-    const video = els().video;
-    if (video.videoWidth && video.videoHeight) {
-      $("resolution").hidden = false;
-      $("resolution").textContent = `${video.videoWidth} × ${video.videoHeight}`;
+  function updateButtons() {
+    if (!isActive()) return;
+    $("ref-start").disabled = uiState !== "ready" || !consented || !referenceDataUrl || connecting;
+    const live = !session?.stopped && Boolean(session?.rt) && ["connected", "generating"].includes(session?.state);
+    const frame = live && $("output").readyState >= 2 && $("output").videoWidth > 0;
+    $("ref-capture").disabled = !frame || connecting;
+  }
+
+  async function describeReference(dataUrl, seq) {
+    describeReady = false;
+    describeError = null;
+    describePromise = (async () => {
+      const response = await fetch("/hair-describe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: dataUrl }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (seq !== uploadSeq) return;
+      if (response.status === 422) {
+        describeError = { status: 422, message: body.error || "헤어가 잘 보이는 사진으로 바꿔주세요" };
+        throw describeError;
+      }
+      if (response.status === 429 || response.status === 503) {
+        describeError = { status: response.status, message: body.error || "잠시 후 다시 시도해 주세요." };
+        throw describeError;
+      }
+      if (!response.ok) {
+        describeError = { status: response.status, message: body.error || "헤어를 분석하지 못했어요." };
+        throw describeError;
+      }
+      hairSpec = body.spec;
+      hairPromptText = body.prompt || buildHairPrompt(body.spec, { withImage: false });
+      describeReady = true;
+    })();
+    try {
+      await describePromise;
+    } catch (error) {
+      if (seq !== uploadSeq) return;
+      if (error?.status === 422) {
+        setUiState("idle");
+        showBanner(error.message, "다른 사진", () => $("ref-file").click());
+      } else if (error?.status === 429 || error?.status === 503) {
+        setUiState("ready");
+        showBanner(error.message);
+      }
     }
-    updateButtons();
   }
 
-  function manualValues() {
-    return {
-      top: Number($("ref-crop-top").value) / 100,
-      bottom: Number($("ref-crop-bottom").value) / 100,
-      left: Number($("ref-crop-left").value) / 100,
-      right: Number($("ref-crop-right").value) / 100,
-      cx: Number($("ref-face-x").value) / 100,
-      cy: Number($("ref-face-y").value) / 100,
-      rw: Number($("ref-face-w").value) / 100,
-      rh: Number($("ref-face-h").value) / 100,
-    };
-  }
-
-  async function applyProtection({ face, cropOverride = null, length = "long" }) {
-    if (!analysis?.bitmap) return false;
-    const result = await processReference({ bitmap: analysis.bitmap, face, cropOverride, length });
-    processedBlob = null;
-    protectedReady = false;
-    if (!result.blob || !result.protected) {
-      setStatus(result.status);
-      updateButtons();
-      return false;
-    }
-    processedBlob = result.blob;
-    protectedReady = true;
-    $("ref-processed").src = URL.createObjectURL(result.blob);
-    setStatus(result.status);
-    updateButtons();
-    return true;
-  }
-
-  async function ingestFile(file, { liveReplace = false } = {}) {
+  async function ingestFile(file) {
     const check = validateReferenceFile(file);
     if (!check.ok) {
-      setError(check.error);
+      showBanner(check.error, "다른 사진", () => $("ref-file").click());
       return;
     }
     const seq = ++uploadSeq;
-    setError("");
-    setStatus("이미지를 읽는 중…");
+    runSeq++;
+    clearCountdown();
+    selfie.stop();
+    stopCamera();
+    if (session && !session.stopped) session.stop("manual");
+    session = null;
+    connecting = false;
+    invalidatePreview();
+    resetDescribe();
+    selfieDataUrl = "";
+    setGlobalError("");
+    hideBanner();
+    let bitmap = null;
     try {
-      if (analysis?.bitmap) {
-        try { analysis.bitmap.close(); } catch { /* ignore */ }
-      }
-      processedBlob = null;
-      protectedReady = false;
       revoke(originalUrl);
       originalUrl = URL.createObjectURL(file);
-      $("ref").src = originalUrl;
-      $("ref").hidden = false;
-      $("clear").hidden = false;
-      $("drop-label").textContent = "다른 이미지로 바꿀 수 있습니다";
+      $("ref-ready-thumb").src = originalUrl;
+      $("ref-live-thumb").src = originalUrl;
       $("ref-original").src = originalUrl;
-      analysis = await analyzeReference(file);
-      if (seq !== uploadSeq || !isActive()) return;
-
-      if (analysis.multiFace) {
-        $("ref-manual").hidden = false;
-        setStatus(`얼굴이 ${analysis.faces.length}명입니다. 한 명 사진으로 바꾸거나 수동 지정하세요.`);
-        updateButtons();
-        return;
-      }
-      if (analysis.needsManual) {
-        $("ref-manual").hidden = false;
-        if (liveReplace) {
-          const defaults = { left: 0, right: 0, top: 0, bottom: 0, cx: 0.5, cy: 0.42, rw: 0.3, rh: 0.36 };
-          const ok = await applyProtection({
-            face: faceFromManual(analysis.width, analysis.height, defaults),
-            cropOverride: cropFromManual(analysis.width, analysis.height, defaults),
-          });
-          if (ok && session && !session.stopped) await pushReferenceToSession(processedBlob);
-          return;
-        }
-        setStatus("얼굴을 찾지 못했습니다. 수동으로 얼굴 보호를 확정하세요.");
-        updateButtons();
-        return;
-      }
-      $("ref-manual").hidden = true;
-      const ok = await applyProtection({ face: analysis.primary, length: "long" });
-      if (!ok || seq !== uploadSeq || !isActive()) return;
-      if (liveReplace && session && !session.stopped) await pushReferenceToSession(processedBlob);
-      else setStatus("얼굴 보호 준비됨. 연결을 누르세요.");
+      const decoded = await decodeReferenceBitmap(file);
+      if (seq !== uploadSeq || !isActive()) { decoded.close(); return; }
+      const scaled = await downscaleBitmap(decoded);
+      bitmap = scaled.bitmap;
+      referenceDataUrl = toUploadDataUrl(bitmap);
+      setUiState("ready");
+      void describeReference(referenceDataUrl, seq);
     } catch (cause) {
       if (seq !== uploadSeq) return;
-      console.error(cause);
-      setError(cause.message || "이미지를 처리하지 못했습니다.");
-      setStatus("이미지 처리에 실패했습니다.");
-      updateButtons();
-    }
-  }
-
-  async function confirmManual() {
-    if (!analysis?.bitmap) return;
-    const values = manualValues();
-    const ok = await applyProtection({
-      face: faceFromManual(analysis.width, analysis.height, values),
-      cropOverride: cropFromManual(analysis.width, analysis.height, values),
-    });
-    if (ok) setStatus("얼굴 보호 준비됨. 연결을 누르세요.");
-    if (ok && session && !session.stopped && isActive()) await pushReferenceToSession(processedBlob);
-  }
-
-  async function pushReferenceToSession(blob) {
-    if (!session || session.stopped || !blob) return;
-    const seq = ++applySeq;
-    switching = true;
-    updateButtons();
-    setStatus("레퍼런스를 적용하는 중…");
-    try {
-      await session.setHairReference(blob, REFERENCE_HAIR_PROMPT, { enhance: true });
-      if (seq !== applySeq || !isActive() || session.stopped) return;
-      setStatus("적용했습니다. 얼굴이 화면 중앙에 있으면 더 안정적입니다.");
-      setError("");
-    } catch (cause) {
-      if (seq !== applySeq) return;
-      console.error(cause);
-      setError("레퍼런스 적용에 실패했어요.");
-      setStatus("적용에 실패했습니다. 다시 시도하세요.");
+      showBanner(cause.message || "이미지를 처리하지 못했습니다.", "다른 사진", () => $("ref-file").click());
+      setUiState("idle");
     } finally {
-      if (seq === applySeq) {
-        switching = false;
-        updateButtons();
-      }
+      try { bitmap?.close(); } catch { /* ignore */ }
     }
   }
 
-  async function connect() {
-    if (!isActive() || !protectedReady || !processedBlob || connecting) return;
-    if (session && !session.stopped) return;
+  async function waitDescribe(uploadAtStart) {
+    if (describePromise) {
+      try { await describePromise; } catch { /* handled below */ }
+    }
+    if (uploadSeq !== uploadAtStart) return false;
+    if (describeError?.status === 422) {
+      setUiState("idle");
+      showBanner(describeError.message, "다른 사진", () => $("ref-file").click());
+      return false;
+    }
+    if (describeError) {
+      setUiState("ready");
+      if (describeError.status === 429) showBanner(describeError.message);
+      else showBanner(describeError.message, "다시 시도", () => startExperience());
+      return false;
+    }
+    if (!describeReady || !hairPromptText) {
+      setUiState("ready");
+      showBanner("헤어 분석을 마치지 못했어요.", "다시 시도", () => startExperience());
+      return false;
+    }
+    return true;
+  }
+
+  async function createPreview(uploadAtStart) {
+    if (previewBlob) return previewBlob;
+    if (textMode()) return null;
+    const response = await fetch("/hair-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ person: selfieDataUrl, reference: referenceDataUrl }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (uploadSeq !== uploadAtStart) return null;
+    if (response.status === 429) {
+      const error = new Error(body.error || "오늘 체험 횟수를 모두 사용했어요.");
+      error.status = 429;
+      throw error;
+    }
+    if (!response.ok) {
+      const error = new Error(body.error || "스타일을 입히지 못했어요");
+      error.status = response.status;
+      throw error;
+    }
+    previewDataUrl = body.image;
+    previewBlob = await (await fetch(previewDataUrl)).blob();
+    previewFailCount = 0;
+    return previewBlob;
+  }
+
+  async function connectLucy({ useImage, prompt, imageBlob, seq, uploadAtStart }) {
     connecting = true;
-    setError("");
-    setStatus("카메라와 Decart에 연결하는 중…");
     updateButtons();
     const epoch = ++cameraEpoch;
     try {
       const sdk = await import("@decartai/sdk");
       const model = sdk.models.realtime("lucy-2.5");
       const stream = await openFrontCamera(model);
-      if (epoch !== cameraEpoch || !isActive() || document.hidden) {
+      if (epoch !== cameraEpoch || !isActive() || document.hidden || seq !== runSeq || uploadSeq !== uploadAtStart) {
         stopMediaStream(stream);
         return;
       }
       camera = stream;
-      showStream(stream, { remote: false });
+      setUiState("live");
+      showLiveStream(stream, { remote: false });
 
       const active = new RealtimeSession({
         mode: "ref",
         anchor: getAnchor(),
         combo: REFERENCE_SESSION_KEY,
         experienceType: "reference",
-        onState: (state) => {
-          if (!isActive()) return;
-          $("connection-state").hidden = false;
-          $("connection-state").textContent = {
-            connecting: "연결 중", connected: "연결됨", generating: "생성 중",
-            reconnecting: "재연결 중", disconnected: "종료",
-          }[state] || state;
+        onState: () => {
+          if (!isActive() || uiState !== "live") return;
           updateButtons();
         },
         onTick: (billed, wall) => {
-          if (!isActive()) return;
+          if (!isActive() || uiState !== "live") return;
           $("remaining").hidden = false;
           $("time-bar").hidden = false;
           updateTime(billed, wall);
         },
         onRemote: (remote) => {
-          if (!isActive() || active.stopped) return;
-          showStream(remote, { remote: true });
-          $("expected-chip").hidden = false;
-          $("ref-live-actions").hidden = false;
+          if (!isActive() || active.stopped || uiState !== "live") return;
+          showLiveStream(remote, { remote: true });
         },
-        onError: (message) => { console.error(message); if (isActive()) setError(message); },
+        onError: (message) => {
+          if (!isActive()) return;
+          setUiState("ready");
+          showBanner(message, "다시 시도", () => startExperience());
+        },
         onStop: ({ reason }) => {
           stopCamera();
           if (!isActive()) return;
-          clearVideo();
-          if (reason === "capture") {
-            setStatus("캡처했습니다. 연결을 끊었습니다.");
-            return;
-          }
-          setStatus({
-            hidden: "화면 이탈로 연결이 종료되었습니다.",
-            manual: "연결을 끊었습니다.",
-            error: "연결 오류. 네트워크를 확인하세요.",
-            disconnected: "원격 연결이 종료되었습니다.",
-            cap: "세션 120초가 끝나 연결을 끊었습니다.",
-          }[reason] || "연결이 종료되었습니다.");
-          updateButtons();
+          $("output").srcObject = null;
+          $("output").hidden = true;
+          setUiState(referenceDataUrl ? "ready" : "idle");
+          if (reason === "error") showBanner("연결에 실패했어요.", "다시 시도", () => startExperience());
         },
         report: reportEnd,
       });
       session = active;
       updateTime(0, 0);
+      const initialState = useImage
+        ? { prompt: { text: prompt, enhance: REFERENCE_ENHANCE }, image: imageBlob }
+        : { prompt: { text: prompt, enhance: REFERENCE_ENHANCE } };
       await active.start(camera, async () => {
         const response = await fetch("/token", { method: "POST" });
         const body = await response.json();
@@ -358,23 +379,19 @@ export function createReferenceFlow({
         model: sdk.models.realtime("lucy-2.5"),
         mirror: "auto",
         resolution: "720p",
-        initialState: {
-          prompt: { text: REFERENCE_HAIR_PROMPT, enhance: true },
-          image: processedBlob,
-        },
+        initialState,
       });
-      if (!isActive() && !active.stopped) active.stop("manual");
-      if (isActive() && !active.stopped) setStatus("연결됨. 이미지의 Try-On을 바꾸거나 캡처하세요.");
+      if ((!isActive() || seq !== runSeq) && !active.stopped) active.stop("manual");
     } catch (cause) {
-      console.error(cause);
-      if (epoch !== cameraEpoch) return;
+      if (epoch !== cameraEpoch || seq !== runSeq) return;
       stopCamera();
-      clearVideo();
-      const message = cause?.code === "camera-denied" ? "카메라 권한이 거부되었습니다."
-        : cause?.code === "camera-missing" ? "사용 가능한 카메라가 없습니다."
-          : (cause?.publicMessage || cause?.message || "연결에 실패했습니다");
-      setError(message);
-      setStatus(message);
+      const denied = cause?.code === "camera-denied";
+      setUiState("ready");
+      showBanner(
+        denied ? "카메라 권한을 허용해주세요" : (cause?.publicMessage || cause?.message || "연결에 실패했습니다"),
+        "다시 시도",
+        () => startExperience(),
+      );
       session?.stop("error");
     } finally {
       connecting = false;
@@ -382,18 +399,125 @@ export function createReferenceFlow({
     }
   }
 
+  async function runAutoPipeline({ forceText = false } = {}) {
+    const seq = ++runSeq;
+    const uploadAtStart = uploadSeq;
+    hideBanner();
+    setGlobalError("");
+    try {
+      setUiState("capture");
+      await selfie.start();
+      await new Promise((resolve) => {
+        const video = $("selfie-video");
+        if (video.readyState >= 2 && video.videoWidth > 0) return resolve();
+        const done = () => { video.removeEventListener("loadeddata", done); resolve(); };
+        video.addEventListener("loadeddata", done);
+        setTimeout(resolve, 2000);
+      });
+      if (seq !== runSeq || uploadSeq !== uploadAtStart || !isActive()) return;
+
+      let count = 3;
+      $("ref-countdown").hidden = false;
+      $("ref-countdown").textContent = String(count);
+      await new Promise((resolve, reject) => {
+        countdownTimer = setInterval(() => {
+          count -= 1;
+          if (seq !== runSeq) {
+            clearCountdown();
+            reject(new Error("cancelled"));
+            return;
+          }
+          if (count <= 0) {
+            clearCountdown();
+            resolve();
+            return;
+          }
+          $("ref-countdown").textContent = String(count);
+        }, 1000);
+      });
+      if (seq !== runSeq || uploadSeq !== uploadAtStart || !isActive()) return;
+
+      const shot = await selfie.capture();
+      selfieDataUrl = shot.dataUrl;
+      $("ref-freeze").src = selfieDataUrl;
+      setUiState("generating");
+
+      const okDescribe = await waitDescribe(uploadAtStart);
+      if (!okDescribe || seq !== runSeq || uploadSeq !== uploadAtStart) return;
+
+      let imageBlob = null;
+      let useImage = !forceText && !textMode();
+      if (useImage) {
+        try {
+          imageBlob = await createPreview(uploadAtStart);
+          if (seq !== runSeq || uploadSeq !== uploadAtStart) return;
+          if (!imageBlob) useImage = false;
+        } catch (error) {
+          if (seq !== runSeq || uploadSeq !== uploadAtStart) return;
+          if (error.status === 429) {
+            setUiState("ready");
+            showBanner(error.message);
+            return;
+          }
+          previewFailCount += 1;
+          setUiState("ready");
+          if (previewFailCount >= 2) {
+            showBanner("스타일을 입히지 못했어요", "간단 모드로 체험", () => { void runAutoPipeline({ forceText: true }); });
+          } else {
+            showBanner("스타일을 입히지 못했어요", "다시 시도", () => startExperience());
+          }
+          return;
+        }
+      }
+
+      const prompt = hairSpec
+        ? buildHairPrompt(hairSpec, { withImage: useImage })
+        : hairPromptText;
+      await connectLucy({ useImage, prompt, imageBlob, seq, uploadAtStart });
+    } catch (cause) {
+      if (seq !== runSeq) return;
+      clearCountdown();
+      selfie.stop();
+      if (cause?.message === "cancelled") return;
+      const denied = cause?.code === "camera-denied";
+      setUiState("ready");
+      showBanner(
+        denied ? "카메라 권한을 허용해주세요" : (cause?.message || "시작하지 못했어요."),
+        "다시 시도",
+        () => startExperience(),
+      );
+    }
+  }
+
+  function startExperience() {
+    if (!isActive() || uiState !== "ready" || !consented || !referenceDataUrl || connecting) return;
+    void runAutoPipeline({ forceText: textMode() });
+  }
+
+  function endLive() {
+    runSeq++;
+    clearCountdown();
+    hideBanner();
+    if (session && !session.stopped) session.stop("manual");
+    else stopCamera();
+    session = null;
+    connecting = false;
+    $("output").srcObject = null;
+    $("output").hidden = true;
+    setUiState("ready");
+  }
+
   function captureResult() {
     try {
-      const canvas = captureFrame(els().video, "레퍼런스 헤어");
+      const canvas = captureFrame($("output"), "레퍼런스 헤어");
       captureCanvas = canvas;
-      session.stop("capture", true);
+      session?.stop("capture", true);
       stopCamera();
       downloadCapture(canvas, { mode: "ref", anchor: getAnchor(), combo: REFERENCE_SESSION_KEY, pose: "정면" });
       $("ref-captured-image").src = canvas.toDataURL("image/png");
-      clearVideo();
-      setStatus("캡처 PNG를 저장했습니다.");
+      setUiState("ready");
     } catch (cause) {
-      setError(cause.message || "캡처에 실패했습니다.");
+      showBanner(cause.message || "캡처에 실패했습니다.", "다시 시도", () => updateButtons());
     }
   }
 
@@ -402,70 +526,61 @@ export function createReferenceFlow({
       const file = $("ref-file").files?.[0];
       if (file) void ingestFile(file);
     });
-    $("ref-replace").addEventListener("click", () => $("ref-replace-file").click());
-    $("ref-replace-file").addEventListener("change", () => {
-      const file = $("ref-replace-file").files?.[0];
-      if (file) void ingestFile(file, { liveReplace: true });
+    $("ref-change").addEventListener("click", () => $("ref-file").click());
+    $("ref-consent-check").addEventListener("change", () => {
+      consented = $("ref-consent-check").checked;
+      updateButtons();
     });
-    const drop = $("drop");
-    drop.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("over"); });
-    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-    drop.addEventListener("drop", (event) => {
+    $("ref-consent-detail").addEventListener("click", (event) => {
       event.preventDefault();
-      drop.classList.remove("over");
-      const file = [...(event.dataTransfer?.files || [])].find((item) => item.type.startsWith("image/"));
-      if (file) void ingestFile(file);
+      detailOpen = !detailOpen;
+      updateConsentCopy();
+      $("ref-consent-extra").hidden = !detailOpen;
     });
-    $("clear").addEventListener("click", () => {
-      stopLive("manual");
-      clearUpload();
-      clearVideo();
-    });
-    $("ref-clear").addEventListener("click", () => $("clear").click());
-    $("ref-confirm-manual").addEventListener("click", () => { void confirmManual(); });
+    $("ref-start").addEventListener("click", () => startExperience());
     $("ref-capture").addEventListener("click", captureResult);
-    $("ref-connect").addEventListener("click", () => { void connect(); });
-    $("ref-disconnect").addEventListener("click", () => {
-      stopLive("manual");
-      setStatus("연결을 끊었습니다.");
-    });
-    $("ref-prepare").addEventListener("click", () => { void connect(); });
-    $("ref-start").addEventListener("click", () => { void connect(); });
-    $("ref-pick").addEventListener("click", () => $("ref-file").click());
-    for (const event of ["loadeddata", "resize", "playing"]) {
-      els().video.addEventListener(event, () => { if (isActive()) updateResolution(); });
+    $("ref-end").addEventListener("click", endLive);
+    for (const event of ["loadeddata", "playing", "resize"]) {
+      $("output").addEventListener(event, () => { if (isActive() && uiState === "live") updateButtons(); });
     }
   }
 
   bind();
-  clearVideo();
-  setStatus("이미지를 고른 뒤 연결을 누르세요.");
+  setUiState("idle");
 
   return {
-    connect,
-    dispose,
-    stopLive,
+    dispose() {
+      clearUpload();
+      setGlobalError("");
+    },
+    stopLive(reason = "manual") {
+      if (session && !session.stopped) session.stop(reason);
+      else stopCamera();
+      if (isActive()) setUiState(referenceDataUrl ? "ready" : "idle");
+    },
     stopCamera,
-    clearVideo,
     updateButtons,
     activate() {
-      $("drop").hidden = false;
-      updateButtons();
-      setStatus(protectedReady ? "얼굴 보호 준비됨. 연결을 누르세요." : "이미지를 고른 뒤 연결을 누르세요.");
+      updateConsentCopy();
+      if (!STATES.includes(uiState)) setUiState("idle");
+      else setUiState(uiState === "live" ? "ready" : (referenceDataUrl ? "ready" : "idle"));
+      $("ref-bottom").hidden = false;
     },
     handleHidden() {
       if (!isActive()) return;
       if (session && !session.stopped) session.stop("hidden");
-      else if (camera) {
-        stopCamera();
-        clearVideo();
-      }
+      else stopCamera();
+      selfie.stop();
+      clearCountdown();
+      if (uiState === "capture" || uiState === "generating" || uiState === "live") setUiState(referenceDataUrl ? "ready" : "idle");
     },
     handlePageHide() {
       if (session && !session.stopped) session.stop("pagehide");
       stopCamera();
+      selfie.stop();
+      clearCountdown();
     },
     get hasLiveSession() { return Boolean(session && !session.stopped); },
-    get screen() { return "ref-upload"; },
+    get state() { return uiState; },
   };
 }

@@ -118,9 +118,11 @@ function reportEnd(payload) {
 }
 function updateResolution() {
   const video = $("output");
-  if (video.videoWidth && video.videoHeight) {
+  if (activeTab === "preset" && video.videoWidth && video.videoHeight) {
     $("resolution").hidden = false;
     $("resolution").textContent = `${video.videoWidth} × ${video.videoHeight}`;
+  } else {
+    $("resolution").hidden = true;
   }
   updateButtons();
 }
@@ -137,6 +139,9 @@ const referenceFlow = createReferenceFlow({
   reportEnd,
   onGlobalError: (message) => error(message),
   getAnchor: () => (lab ? anchor : "on"),
+  isLab: lab,
+  getRefMode: () => (lab && params.get("refmode") === "text" ? "text" : "preview"),
+  getPrivacy: () => config?.privacy || {},
   getSharedEls: () => ({
     video: $("output"),
     label: $("stage-label"),
@@ -169,9 +174,12 @@ function selectTab(next) {
   error("");
   $("tab-reference").setAttribute("aria-pressed", String(next === "reference"));
   $("tab-preset").setAttribute("aria-pressed", String(next === "preset"));
-  $("drop").hidden = next !== "reference";
+  document.documentElement.classList.toggle("tab-reference", next === "reference");
+  $("ref-bottom").hidden = next !== "reference";
   $("preset-bar").hidden = next !== "preset";
-  $("ref-manual").hidden = true;
+  $("preset-actions").hidden = next !== "preset";
+  $("status").hidden = next !== "preset";
+  $("billing-note").hidden = next !== "preset";
   $("panel-preset").hidden = next !== "preset";
   $("panel-reference").hidden = next !== "reference";
   if (next === "reference") {
@@ -390,8 +398,7 @@ for (const container of document.querySelectorAll("[data-combos]")) {
 for (const region of REGIONS) $("region").add(new Option(region, region));
 
 $("connect").addEventListener("click", () => {
-  if (activeTab === "reference") referenceFlow.connect();
-  else void startPreset();
+  if (activeTab === "preset") void startPreset();
 });
 $("disconnect").addEventListener("click", () => {
   if (activeTab === "reference") {
@@ -458,8 +465,12 @@ window.addEventListener("pageshow", (event) => {
 });
 
 async function initialize() {
-  $("drop").hidden = false;
+  $("ref-bottom").hidden = false;
   $("preset-bar").hidden = true;
+  $("preset-actions").hidden = true;
+  $("status").hidden = true;
+  $("billing-note").hidden = true;
+  document.documentElement.classList.add("tab-reference");
   $("tab-reference").setAttribute("aria-pressed", "true");
   $("tab-preset").setAttribute("aria-pressed", "false");
   updateButtons();

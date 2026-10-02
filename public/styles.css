@@ -22,6 +22,10 @@ main {
   max-width: 480px;
   margin: 0 auto;
   padding: 12px 14px 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 header h1 {
@@ -32,7 +36,8 @@ header h1 {
 header p,
 .fine,
 #stage-label,
-#drop-label {
+#drop-label,
+#ref-summary {
   margin: 0;
   color: #b7bdc9;
   font-size: 13px;
@@ -174,6 +179,219 @@ button:focus-visible,
 .chip.top-left { top: 10px; left: 10px; }
 .chip.top-right { top: 10px; right: 10px; }
 .chip.bottom { bottom: 10px; left: 10px; }
+
+.consent-box {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border: 1px solid #2a3140;
+  border-radius: 16px;
+  background: #171a22;
+}
+
+/* Reference tab: five-state stage layers */
+.ref-layer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 1;
+}
+.ref-upload-hit {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 20px;
+  text-align: center;
+  color: #b7bdc9;
+  font-size: 15px;
+  cursor: pointer;
+  border: 1px dashed #8d93a3;
+  border-radius: 16px;
+  background: transparent;
+}
+#ref-layer-ready {
+  gap: 12px;
+  align-content: center;
+}
+#ref-ready-thumb {
+  width: min(42%, 160px);
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: 12px;
+  background: #1c2030;
+}
+.ref-change,
+button.ref-change {
+  background: transparent;
+  color: #b7bdc9;
+  padding: 4px 8px;
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.ref-capture-layer video,
+.ref-generating-layer img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #08090d;
+}
+.ref-capture-layer video { transform: scaleX(-1); }
+.selfie-guide {
+  position: absolute;
+  inset: 12% 18%;
+  border: 2px dashed #ece7ff;
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 999px rgb(8 9 13 / 18%);
+  z-index: 2;
+}
+.ref-overlay-text {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 14%;
+  margin: 0;
+  text-align: center;
+  z-index: 3;
+  color: #f4f5f7;
+  font-size: 15px;
+  text-shadow: 0 1px 4px #08090d;
+}
+.ref-countdown {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  z-index: 4;
+  font-size: 72px;
+  font-weight: 700;
+  color: #f4f5f7;
+  text-shadow: 0 2px 12px #08090d;
+  pointer-events: none;
+}
+.ref-generating-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  background: rgb(8 9 13 / 55%);
+  z-index: 2;
+  color: #f4f5f7;
+  font-size: 15px;
+}
+.ref-generating-overlay p { margin: 0; }
+.ref-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #2a3140;
+  border-top-color: #ece7ff;
+  border-radius: 50%;
+  animation: ref-spin 0.8s linear infinite;
+}
+@keyframes ref-spin { to { transform: rotate(360deg); } }
+.ref-live-thumb {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  width: 56px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #1c2030;
+  border: 1px solid #2a3140;
+}
+.ref-stage-banner {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 14px;
+  z-index: 5;
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgb(8 9 13 / 86%);
+  text-align: center;
+}
+.ref-stage-banner p {
+  margin: 0;
+  font-size: 13px;
+  color: #f4f5f7;
+}
+.ref-stage-banner button {
+  background: #ece7ff;
+  color: #1b1730;
+  font-weight: 650;
+}
+.ref-bottom {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 8px;
+}
+#ref-ready-bar {
+  display: grid;
+  gap: 8px;
+}
+.ref-consent-line {
+  align-items: center;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #b7bdc9;
+}
+.ref-consent-line span { flex: 1; }
+button.linkish {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #ece7ff;
+  font: inherit;
+  font-size: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+#ref-start {
+  background: #ece7ff;
+  color: #1b1730;
+  font-weight: 650;
+  width: 100%;
+}
+#ref-live-bar #ref-end {
+  background: #ece7ff;
+  color: #1b1730;
+  font-weight: 650;
+}
+
+html.tab-reference main {
+  overflow: hidden;
+}
+html.tab-reference .stage {
+  min-height: 0;
+}
+@media (max-width: 400px) {
+  html.tab-reference main {
+    gap: 8px;
+    padding: 10px 12px 12px;
+  }
+  html.tab-reference header p { display: none; }
+  html.tab-reference .ref-consent-line { font-size: 11px; }
+  html.tab-reference button,
+  html.tab-reference .file {
+    padding: 9px 12px;
+  }
+}
 
 .manual {
   flex: 0 0 auto;
