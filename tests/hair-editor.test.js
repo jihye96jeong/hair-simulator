@@ -18,22 +18,11 @@ test("buildEditParts alternates labels and images then instruction with features
   assert.equal(parts[2].text, "HAIRSTYLE REFERENCE:");
   assert.equal(parts[3].inlineData.data, "cmVm");
   assert.equal(parts[4].text, buildEditInstruction(FEATURES));
-  assert.ok(parts[4].text.includes("Match every listed trait"));
+  assert.ok(parts[4].text.includes("Match precisely: front hair direction"));
   assert.ok(parts[4].text.includes(`Target hairstyle: ${FEATURES}`));
   assert.ok(parts[4].text.includes("Completely remove the person's current hair"));
   assert.ok(parts[4].text.includes("intentionally covered with gray"));
-  assert.ok(parts[4].text.includes("Do not invent a different texture"));
-  const guided = buildEditParts({
-    personB64: "cGVyc29u",
-    referenceB64: "cmVm",
-    features: FEATURES,
-    guide: Buffer.from("guide"),
-    hairOnly: Buffer.from("hair"),
-    editMask: Buffer.from("mask"),
-  });
-  assert.ok(guided.some((p) => p.text?.includes("ALIGNED HAIR GUIDE")));
-  assert.ok(guided.some((p) => p.text?.includes("ISOLATED REFERENCE HAIR")));
-  assert.ok(guided.at(-1).text.includes("Primary geometry comes from"));
+  assert.equal(parts.length, 5);
   assert.throws(() => buildEditParts({ personB64: "a", referenceB64: "b", features: "" }), /invalid-features/);
   assert.ok(HAIR_EDIT_INSTRUCTION.includes("Target hairstyle:"));
 });

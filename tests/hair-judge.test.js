@@ -1,15 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  COMPARE_FIELDS,
-  PASS_MATCH_MIN,
-  candidatePasses,
+  SCORE_FIELDS,
   countHairMatches,
-  evaluateCandidate,
-  fatalMismatches,
-  pickCoreFields,
+  pickScoreFields,
   runPreviewContest,
-  selectPassingCandidate,
+  selectBestCandidate,
 } from "../lib/hair-judge.js";
 
 const ref = {
@@ -39,74 +35,40 @@ const person = {
   length: "shoulder",
 };
 
-test("hairMatch counts all compare fields and never exceeds 9", () => {
-  assert.equal(COMPARE_FIELDS.length, 9);
-  assert.equal(countHairMatches(ref, ref), 9);
-  assert.ok(countHairMatches(ref, person) < PASS_MATCH_MIN);
-  assert.deepEqual(Object.keys(pickCoreFields(ref)).sort(), [...COMPARE_FIELDS].sort());
+test("countHairMatches only scores front/forehead/sides and stays in 0–3", () => {
+  assert.deepEqual([...SCORE_FIELDS], ["front", "forehead", "sides"]);
+  assert.equal(countHairMatches(ref, ref), 3);
+  assert.equal(countHairMatches(ref, person), 0);
+  assert.equal(countHairMatches(ref, { ...ref, front: "lifted_up" }), 2);
+  assert.equal(countHairMatches(ref, { ...person, front: ref.front, forehead: ref.forehead, sides: ref.sides }), 3);
+  assert.ok(countHairMatches(ref, ref) <= 3);
+  assert.deepEqual(Object.keys(pickScoreFields(ref)).sort(), [...SCORE_FIELDS].sort());
 });
 
-test("straight short falling bangs vs wavy parted volume is a fatal fail", () => {
-  const wavyParted = {
-    ...ref,
-    front: "parted_curtain",
-    forehead: "fully_exposed",
-    texture: "s_wave",
-    part: "center",
-    volume: "voluminous",
-    bangs: "curtain",
-  };
-  const result = evaluateCandidate(ref, person, wavyParted);
-  assert.equal(result.pass, false);
-  assert.ok(result.fatals.some((f) => f.field === "texture"));
-  assert.ok(result.fatals.some((f) => f.field === "front"));
-  assert.ok(result.fatals.some((f) => f.field === "part"));
-  assert.ok(fatalMismatches(ref, wavyParted).length >= 3);
-  assert.equal(candidatePasses(ref, person, wavyParted), false);
-});
-
-test("all fields match => hairMatch 9; same as person => changed false", () => {
-  const allMatch = evaluateCandidate(ref, person, ref);
-  assert.equal(allMatch.hairMatch, 9);
-  assert.equal(allMatch.changed, true);
-  assert.equal(allMatch.pass, true);
-  assert.equal(allMatch.fatals.length, 0);
-
-  const unchanged = evaluateCandidate(ref, person, person);
-  assert.equal(unchanged.changed, false);
-  assert.equal(unchanged.pass, false);
-
-  const sameAsSelfie = evaluateCandidate(ref, ref, ref);
-  assert.equal(sameAsSelfie.hairMatch, 9);
-  assert.equal(sameAsSelfie.changed, false);
-  assert.equal(sameAsSelfie.pass, true);
-});
-
-test("selectPassingCandidate ignores non-passers even with high match", () => {
-  const pick = selectPassingCandidate([
-    { index: 0, hairMatch: 8, pass: false, buffer: "a" },
-    { index: 1, hairMatch: 7, pass: true, buffer: "b" },
+test("selectBestCandidate picks highest score and keeps first on ties", () => {
+  const pick = selectBestCandidate([
+    { index: 0, hairMatch: 1, buffer: "a" },
+    { index: 1, hairMatch: 3, buffer: "b" },
+    { index: 2, hairMatch: 2, buffer: "c" },
   ]);
   assert.equal(pick.buffer, "b");
-  assert.equal(selectPassingCandidate([{ hairMatch: 9, pass: false }]), null);
+  const tie = selectBestCandidate([
+    { index: 0, hairMatch: 2, buffer: "first" },
+    { index: 1, hairMatch: 2, buffer: "second" },
+  ]);
+  assert.equal(tie.buffer, "first");
+  assert.equal(selectBestCandidate([]), null);
 });
 
-const passCompare = async () => ({
-  frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
-  silhouette: true, sideLength: true, color: true, identity: true, scene: true,
-  uncertain: false, reasons: [], pass: true,
-});
-
-test("runPreviewContest describes the cropped person buffer first", async () => {
-  const personBuf = Buffer.from("cropped-selfie");
-  const described = [];
+test("runPreviewContest picks higher match without regenerate", async () => {
+  const weak = { ...person };
+  const strong = { ...ref };
+  let describes = 0;
   const vision = {
-    describe: async (buf) => {
-      described.push(Buffer.from(buf).toString());
-      if (described.length === 1) return { ok: true, spec: person };
-      return { ok: true, spec: ref };
+    describe: async () => {
+      describes += 1;
+      return { ok: true, spec: describes === 1 ? weak : strong };
     },
-    compare: passCompare,
   };
   let edits = 0;
   const editor = {
@@ -115,50 +77,38 @@ test("runPreviewContest describes the cropped person buffer first", async () => 
   const result = await runPreviewContest({
     editor,
     vision,
-    person: personBuf,
-    reference: Buffer.from("masked-ref"),
+    person: Buffer.from("p"),
+    reference: Buffer.from("r"),
     referenceSpec: ref,
     features: "Target",
     labDebug: true,
   });
-  assert.equal(described[0], "cropped-selfie");
-  assert.equal(result.selectedIndex, 0);
-  assert.equal(result.candidates[0].hairMatch, 9);
-  assert.equal(result.candidates[0].changed, true);
+  assert.equal(edits, 2);
+  assert.equal(describes, 2);
+  assert.equal(result.selectedIndex, 1);
+  assert.equal(result.scores[0].hairMatch, 0);
+  assert.equal(result.scores[1].hairMatch, 3);
+  assert.equal(result.candidates[1].selected, true);
 });
 
-test("runPreviewContest retries then rejects without fallback", async () => {
-  const miss = { ...person };
-  let describes = 0;
+test("runPreviewContest returns a buffer when both candidates score 0", async () => {
   const vision = {
-    describe: async () => {
-      describes += 1;
-      if (describes === 1) return { ok: true, spec: person };
-      return { ok: true, spec: miss };
-    },
-    compare: passCompare,
+    describe: async () => ({ ok: true, spec: person }),
   };
   let edits = 0;
   const editor = {
-    edit: async () => ({ buffer: Buffer.from(String(edits++)), mediaType: "image/jpeg" }),
+    edit: async () => ({ buffer: Buffer.from(`zero-${edits++}`), mediaType: "image/jpeg" }),
   };
-  await assert.rejects(
-    () => runPreviewContest({
-      editor,
-      vision,
-      person: Buffer.from("p"),
-      reference: Buffer.from("r"),
-      referenceSpec: ref,
-      features: "Target",
-      labDebug: true,
-    }),
-    (error) => {
-      assert.equal(error.code, "no-style-match");
-      assert.equal(error.attempts, 2);
-      assert.ok(Array.isArray(error.failReasons) && error.failReasons.length);
-      assert.ok(Array.isArray(error.candidates));
-      return true;
-    },
-  );
-  assert.equal(edits, 4);
+  const result = await runPreviewContest({
+    editor,
+    vision,
+    person: Buffer.from("p"),
+    reference: Buffer.from("r"),
+    referenceSpec: ref,
+    features: "Target",
+  });
+  assert.equal(edits, 2);
+  assert.equal(result.selectedIndex, 0);
+  assert.equal(result.scores.every((s) => s.hairMatch === 0), true);
+  assert.equal(result.buffer.toString(), "zero-0");
 });

@@ -51,7 +51,7 @@ npm start
 | `HAIR_DESCRIBE_DAILY_IP_LIMIT` | 20 | IP당 하루 묘사 횟수 |
 | `HAIR_DESCRIBE_DAILY_TOTAL_LIMIT` | 500 | 전체 하루 묘사 횟수 |
 | `HAIR_EDIT_PROVIDER` | `gemini` | 미리보기 편집 공급자 |
-| `HAIR_EDIT_MODEL` | `gemini-3.1-flash-image` | 미리보기 편집 모델 |
+| `HAIR_EDIT_MODEL` | `gemini-3-pro-image` | 미리보기 편집 모델 |
 | `GEMINI_API_KEY` | (없음) | 미리보기 편집. 없으면 `/hair-preview`는 503입니다. |
 | `HAIR_PREVIEW_DAILY_IP_LIMIT` | 10 | IP당 하루 미리보기 횟수 |
 | `HAIR_PREVIEW_DAILY_TOTAL_LIMIT` | 200 | 전체 하루 미리보기 횟수 |

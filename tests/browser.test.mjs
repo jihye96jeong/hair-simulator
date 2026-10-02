@@ -143,11 +143,6 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
         lastDescribeImage = Buffer.from(image);
         return { ok: true, spec: describeSpec };
       },
-      compare: async () => ({
-        frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
-        silhouette: true, sideLength: true, color: true, identity: true, scene: true,
-        uncertain: false, reasons: [], pass: true,
-      }),
     },
     hairEditor: {
       edit: async ({ reference, features }) => {
@@ -230,6 +225,9 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.ok(describePost && previewPost);
   assert.notEqual(describePost.body.image, previewPost.body.reference);
   assert.equal(previewPost.body.reference.startsWith("data:image/jpeg"), true);
+  assert.equal(previewPost.body.guide, undefined);
+  assert.equal(previewPost.body.hairOnly, undefined);
+  assert.equal(previewPost.body.editMask, undefined);
 
   const initial = await page.evaluate(async () => {
     const image = window.__options.initialState.image;
@@ -343,16 +341,14 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await labPage.locator("#ref-start").click();
   await expect(labPage.locator("#ref-live-bar")).toBeVisible({ timeout: 30000 });
   await expect(labPage.locator("#ref-lab-debug")).toBeVisible();
-  await expect(labPage.locator("#ref-lab-original")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-masked")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-selfie")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator(".ref-lab-candidate img").first()).toHaveAttribute("src", /data:image/);
-  await expect(labPage.locator("#ref-lab-spec-table")).toContainText("selfie");
-  await expect(labPage.locator("#ref-lab-spec-table")).toContainText("front");
-  await expect(labPage.locator("#ref-lab-spec-table")).toContainText("texture");
-  await expect(labPage.locator("#ref-lab-selected")).toHaveAttribute("src", /data:image/);
-  await expect(labPage.locator("#ref-lab-diagnose")).toContainText("first-failure-hint");
-  await expect(labPage.locator("#ref-lab-prompt")).toHaveText(IMAGE_HAIR_PROMPT);
+  await expect(labPage.locator(".ref-lab-candidate figcaption").first()).toContainText("front:");
+  await expect(labPage.locator(".ref-lab-candidate figcaption").first()).toContainText("forehead:");
+  await expect(labPage.locator(".ref-lab-candidate figcaption").first()).toContainText("sides:");
+  await expect(labPage.locator("#ref-lab-prompt")).toContainText("enhance=false");
+  await expect(labPage.locator("#ref-lab-prompt")).toContainText(IMAGE_HAIR_PROMPT);
 
   const nativePage = await context.newPage();
   await nativePage.goto(base);
@@ -373,11 +369,6 @@ test("browser: / and /lab (no params) share hair-preview reference and Lucy init
     store: { saveLead: async () => ({ imageFileId: "x" }) },
     hairVision: {
       describe: async () => ({ ok: true, spec: describeSpec }),
-      compare: async () => ({
-        frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
-        silhouette: true, sideLength: true, color: true, identity: true, scene: true,
-        uncertain: false, reasons: [], pass: true,
-      }),
     },
     hairEditor: { edit: async () => ({ buffer: previewJpeg, mediaType: "image/jpeg" }) },
   });
@@ -447,11 +438,6 @@ test("browser: reference UI state screenshots", { timeout: 120000 }, async (t) =
     store: { saveLead: async () => ({ imageFileId: "x" }) },
     hairVision: {
       describe: async () => ({ ok: true, spec: describeSpec }),
-      compare: async () => ({
-        frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
-        silhouette: true, sideLength: true, color: true, identity: true, scene: true,
-        uncertain: false, reasons: [], pass: true,
-      }),
     },
     hairEditor: { edit: async () => ({ buffer: previewJpeg, mediaType: "image/jpeg" }) },
   });

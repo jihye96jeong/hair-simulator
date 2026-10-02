@@ -19,11 +19,6 @@ const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 const DESCRIBE_MAX_BYTES = 2 * 1024 * 1024;
 const PREVIEW_MAX_BYTES = Math.floor(1.2 * 1024 * 1024);
 
-function parseOptionalDataImage(image, maxBytes) {
-  if (image == null || image === "") return { buffer: null, mediaType: null };
-  return parseDataImage(image, maxBytes);
-}
-
 function parseDataImage(image, maxBytes) {
   if (typeof image !== "string") return { status: 400, error: "이미지 형식을 확인해 주세요." };
   const trimmed = image.trim();
@@ -74,7 +69,7 @@ export async function createApp({
     if (req.method === "POST" && ((req.headers.origin && req.headers.origin !== config.origin) || req.headers["sec-fetch-site"] === "cross-site")) return res.status(403).json({ error: "요청 출처를 확인해 주세요." });
     next();
   });
-  app.use(express.json({ limit: "8mb", type: ["application/json", "text/plain"] }));
+  app.use(express.json({ limit: "3mb", type: ["application/json", "text/plain"] }));
   app.get("/config", async (_req, res) => {
     res.set("Cache-Control", "no-store").json({
       mode: config.mode,
@@ -140,13 +135,6 @@ export async function createApp({
       return res.status(400).json({ error: "헤어 정보가 올바르지 않아요." });
     }
     const features = buildEditFeatures(sanitized.spec);
-    const guide = parseOptionalDataImage(req.body?.guide, PREVIEW_MAX_BYTES);
-    if (guide.status) return res.status(guide.status).json({ error: guide.error });
-    const hairOnly = parseOptionalDataImage(req.body?.hairOnly, PREVIEW_MAX_BYTES);
-    if (hairOnly.status) return res.status(hairOnly.status).json({ error: hairOnly.error });
-    const editMask = parseOptionalDataImage(req.body?.editMask, PREVIEW_MAX_BYTES);
-    if (editMask.status) return res.status(editMask.status).json({ error: editMask.error });
-    const guideReason = typeof req.body?.guideReason === "string" ? req.body.guideReason.slice(0, 80) : "";
     const reservation = previewQuota.reserve(req.ip);
     if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
     const started = Date.now();
@@ -161,31 +149,20 @@ export async function createApp({
         mediaType: "image/jpeg",
         timeoutMs: 90000,
         labDebug: req.body?.labDebug === true,
-        guide: guide.buffer || undefined,
-        hairOnly: hairOnly.buffer || undefined,
-        editMask: editMask.buffer || undefined,
-        referenceMediaType: reference.mediaType,
       });
       logger.info?.("hair-preview", {
         ok: true,
         ms: result.ms ?? (Date.now() - started),
-        attempts: result.attempts,
         scores: result.scores,
         selectedIndex: result.selectedIndex,
-        guide: Boolean(guide.buffer),
-        guideReason: guideReason || undefined,
       });
       res.json({
         image: `data:${result.mediaType};base64,${result.buffer.toString("base64")}`,
         scores: result.scores,
-        attempts: result.attempts,
         selectedIndex: result.selectedIndex,
         candidates: result.candidates,
         reference: result.reference,
-        person: result.person,
         editModel: modelChoice.model,
-        guideUsed: Boolean(guide.buffer),
-        guideReason: guideReason || null,
       });
     } catch (error) {
       reservation.release();
@@ -193,20 +170,7 @@ export async function createApp({
         ok: false,
         ms: Date.now() - started,
         reason: error?.code || "error",
-        attempts: error?.attempts,
-        failReasons: error?.failReasons,
       });
-      if (error?.code === "no-style-match") {
-        return res.status(422).json({
-          error: "맞는 헤어 미리보기를 만들지 못했어요. 다시 시도해 주세요.",
-          failReasons: error.failReasons || [],
-          scores: error.scores || [],
-          candidates: error.candidates,
-          attempts: error.attempts,
-          reference: error.reference,
-          person: error.person,
-        });
-      }
       logger.error("헤어 미리보기 실패");
       res.status(502).json({ error: "미리보기를 만들지 못했어요. 다시 시도해 주세요." });
     }

@@ -33,18 +33,8 @@ const personPreviewSpec = {
   top: "medium",
 };
 function createPassVision() {
-  let calls = 0;
   return {
-    describe: async () => {
-      calls += 1;
-      if (calls === 1) return { ok: true, spec: personPreviewSpec };
-      return { ok: true, spec: previewSpec };
-    },
-    compare: async () => ({
-      frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
-      silhouette: true, sideLength: true, color: true, identity: true, scene: true,
-      uncertain: false, reasons: [], pass: true,
-    }),
+    describe: async () => ({ ok: true, spec: previewSpec }),
   };
 }
 async function fixture(t, options = {}) {
@@ -269,10 +259,25 @@ test("/hair-preview returns jpeg and rejects bad inputs without leaking images",
   assert.equal(ok.headers.get("cache-control"), "no-store");
   const body = await ok.json();
   assert.match(body.image, /^data:image\/jpeg;base64,/);
-  assert.equal(body.attempts, 1);
   assert.ok(Array.isArray(body.scores));
+  assert.equal(body.scores.length, 2);
   assert.ok(!JSON.stringify(logs).includes(person.slice(30, 80)));
   assert.ok(!JSON.stringify(logs).includes("base64"));
+
+  // Extra guide fields are ignored
+  const withGuide = await f.post("/hair-preview", {
+    person,
+    reference,
+    spec: previewSpec,
+    guide: person,
+    hairOnly: person,
+    editMask: person,
+    guideReason: "should-be-ignored",
+  });
+  assert.equal(withGuide.status, 200);
+  const guideBody = await withGuide.json();
+  assert.equal(guideBody.guideUsed, undefined);
+  assert.equal(guideBody.guideReason, undefined);
 
   const none = await fixture(t, { hairEditor: null, hairVision: null });
   assert.equal((await none.post("/hair-preview", { person: await jpegDataUrl(), reference: await jpegDataUrl(), spec: previewSpec })).status, 503);
@@ -311,12 +316,10 @@ test("/hair-preview quota releases on failure and rejects a second success", asy
   assert.equal((await f.post("/hair-preview", { person, reference, spec: previewSpec })).status, 429);
 });
 
-test("/hair-preview contest selects, retries, falls back, and rejects bad vision", async (t) => {
+test("/hair-preview contest selects best of two and returns even at zero match", async (t) => {
   const mk = async (color) => sharp({ create: { width: 8, height: 8, channels: 3, background: color } }).jpeg().toBuffer();
   const a = await mk("#111");
   const b = await mk("#222");
-  const c = await mk("#333");
-  const d = await mk("#444");
   const person = await jpegDataUrl();
   const reference = await jpegDataUrl();
   const weak = {
@@ -324,31 +327,22 @@ test("/hair-preview contest selects, retries, falls back, and rejects bad vision
     front: "falls_down",
     forehead: "covered",
     sides: "over_ears",
-    top: "medium",
   };
   const okSpec = { ...previewSpec };
+  const zero = { ...personPreviewSpec };
 
   function visionFromSpecs(specs) {
     let i = 0;
     return {
       describe: async () => {
-        if (i === 0) {
-          i += 1;
-          return { ok: true, spec: personPreviewSpec };
-        }
-        const spec = specs[i - 1];
+        const spec = specs[i];
         i += 1;
         return { ok: true, spec };
       },
-      compare: async () => ({
-        frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
-        silhouette: true, sideLength: true, color: true, identity: true, scene: true,
-        uncertain: false, reasons: [], pass: true,
-      }),
     };
   }
 
-  // First batch: second candidate passes with higher hairMatch
+  // Higher match wins
   {
     let n = 0;
     const bufs = [a, b];
@@ -359,42 +353,27 @@ test("/hair-preview contest selects, retries, falls back, and rejects bad vision
     const res = await f.post("/hair-preview", { person, reference, spec: previewSpec });
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.attempts, 1);
     assert.equal(body.selectedIndex, 1);
     assert.equal(body.scores.length, 2);
+    assert.equal(body.scores[0].hairMatch, 0);
+    assert.equal(body.scores[1].hairMatch, 3);
     assert.equal(body.image, `data:image/jpeg;base64,${b.toString("base64")}`);
   }
 
-  // First batch fails pass rule; second batch passes
+  // Both score 0 → still 200 with first candidate
   {
     let n = 0;
-    const bufs = [a, b, c, d];
+    const bufs = [a, b];
     const f = await fixture(t, {
       hairEditor: { edit: async () => ({ buffer: bufs[n++], mediaType: "image/jpeg" }) },
-      hairVision: visionFromSpecs([weak, weak, okSpec, weak]),
-    });
-    const body = await (await f.post("/hair-preview", { person, reference, spec: previewSpec })).json();
-    assert.equal(body.attempts, 2);
-    assert.equal(body.selectedIndex, 2);
-    assert.equal(body.image, `data:image/jpeg;base64,${c.toString("base64")}`);
-  }
-
-  // No passers after retry → 422, no Lucy image
-  {
-    let n = 0;
-    const bufs = [a, b, c, d];
-    const none = { ...personPreviewSpec };
-    const oneMatch = { ...personPreviewSpec, front: previewSpec.front };
-    const f = await fixture(t, {
-      hairEditor: { edit: async () => ({ buffer: bufs[n++], mediaType: "image/jpeg" }) },
-      hairVision: visionFromSpecs([none, none, oneMatch, none]),
+      hairVision: visionFromSpecs([zero, zero]),
     });
     const res = await f.post("/hair-preview", { person, reference, spec: previewSpec, labDebug: true });
-    assert.equal(res.status, 422);
+    assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.attempts, 2);
-    assert.equal(body.image, undefined);
-    assert.ok(Array.isArray(body.failReasons));
+    assert.equal(body.selectedIndex, 0);
+    assert.equal(body.scores.every((s) => s.hairMatch === 0), true);
+    assert.equal(body.image, `data:image/jpeg;base64,${a.toString("base64")}`);
     assert.ok(Array.isArray(body.candidates));
   }
 
@@ -414,10 +393,10 @@ test("/hair-preview contest selects, retries, falls back, and rejects bad vision
       },
     });
     assert.equal((await f.post("/hair-preview", { person, reference, spec: previewSpec })).status, 502);
-    assert.equal(edits, 0);
+    assert.equal(edits, 2);
     edits = 0;
     assert.equal((await f.post("/hair-preview", { person, reference, spec: previewSpec })).status, 502);
-    assert.equal(edits, 0);
+    assert.equal(edits, 2);
   }
 });
 
@@ -429,7 +408,7 @@ test("/hair-preview rejects editModel outside allowlist", async (t) => {
   const person = await jpegDataUrl();
   const reference = await jpegDataUrl();
   assert.equal(
-    (await f.post("/hair-preview", { person, reference, spec: previewSpec, editModel: "gemini-3-pro-image" })).status,
+    (await f.post("/hair-preview", { person, reference, spec: previewSpec, editModel: "gemini-3.1-flash-image" })).status,
     400,
   );
 });
