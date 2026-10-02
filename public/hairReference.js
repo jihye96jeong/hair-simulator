@@ -1,3 +1,5 @@
+import { maskReferenceForPreview } from "./faceMask.js";
+
 /** Limits shown in UI and enforced in prepareReferenceFromFile. */
 export const REFERENCE_MAX_BYTES = 8 * 1024 * 1024;
 export const REFERENCE_ALLOWED_TYPES = Object.freeze(["image/jpeg", "image/png", "image/webp"]);
@@ -64,4 +66,13 @@ export function toUploadDataUrl(bitmap) {
   }
   context.drawImage(bitmap, 0, 0);
   return canvas.toDataURL("image/jpeg", 0.9);
+}
+
+/**
+ * Original JPEG for /hair-describe; gray-masked JPEG for /hair-preview only.
+ */
+export async function prepareReferenceUpload(bitmap) {
+  const originalDataUrl = toUploadDataUrl(bitmap);
+  const maskedDataUrl = await maskReferenceForPreview(bitmap);
+  return { originalDataUrl, maskedDataUrl };
 }

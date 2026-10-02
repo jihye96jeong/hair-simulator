@@ -15,7 +15,8 @@
     "retry": "/vendor/retry.js",
     "is-network-error": "/vendor/is-network-error/index.js",
     "livekit-client": "/vendor/livekit/livekit-client.esm.mjs",
-    "jose": "/vendor/jose/index.js"
+    "jose": "/vendor/jose/index.js",
+    "@mediapipe/tasks-vision": "/vendor/mediapipe/vision_bundle.mjs"
   } }
   </script>
   <script type="module" src="/app.js"></script>
@@ -75,6 +76,7 @@
         <p id="ref-stage-message"></p>
         <button type="button" id="ref-stage-action" hidden></button>
       </div>
+      <!-- /lab 디버그 패널은 referenceFlow가 isLab일 때만 #ref-lab-debug로 주입 -->
 
       <p id="stage-label" hidden>연결을 누르면 카메라가 켜집니다</p>
       <span id="combo-label" class="chip top-left" hidden>헤어라인 · 부분</span>

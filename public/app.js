@@ -134,13 +134,30 @@ function updateTime(billed, wall) {
   $("time-bar").value = remaining;
 }
 
+/** Lab-only explicit URL overrides for the reference pipeline. Empty ⇒ same as `/`. */
+function getLabRefOptions() {
+  if (!lab) return {};
+  const opts = {};
+  const refmode = params.get("refmode");
+  if (refmode === "text" || refmode === "preview") opts.refmode = refmode;
+  const promptmode = params.get("promptmode");
+  if (promptmode === "spec" || promptmode === "image") opts.promptmode = promptmode;
+  const lucyprompt = params.get("lucyprompt");
+  if (lucyprompt) opts.lucyprompt = lucyprompt;
+  if (params.get("anchor") === "off") opts.anchor = "off";
+  else if (params.get("anchor") === "on") opts.anchor = "on";
+  const editmodel = params.get("editmodel");
+  if (editmodel) opts.editmodel = editmodel;
+  return opts;
+}
+
 const referenceFlow = createReferenceFlow({
   isActive: () => activeTab === "reference",
   reportEnd,
   onGlobalError: (message) => error(message),
-  getAnchor: () => (lab ? anchor : "on"),
+  getAnchor: () => getLabRefOptions().anchor || "on",
   isLab: lab,
-  getRefMode: () => (lab && params.get("refmode") === "text" ? "text" : "preview"),
+  getLabOptions: getLabRefOptions,
   getPrivacy: () => config?.privacy || {},
   getSharedEls: () => ({
     video: $("output"),

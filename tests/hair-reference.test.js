@@ -34,4 +34,8 @@ test("Decart image path only uses preview blob, never raw reference upload varia
   assert.equal(flow.includes("image: originalUrl"), false);
   assert.ok(flow.includes("/hair-preview"));
   assert.ok(flow.includes("previewBlob"));
+  assert.ok(flow.includes("maskedReferenceDataUrl"));
+  assert.ok(flow.includes("reference: maskedReferenceDataUrl"));
+  assert.equal(flow.includes("restoreFaceOnPreview"), false);
+  assert.ok(flow.includes("previewDataUrl"));
 });

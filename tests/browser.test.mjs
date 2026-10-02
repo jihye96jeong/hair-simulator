@@ -5,7 +5,7 @@ import { chromium, expect } from "@playwright/test";
 import sharp from "sharp";
 import { createApp } from "../server.js";
 import { readConfig } from "../lib/config.js";
-import { buildHairPrompt } from "../public/hairPrompt.js";
+import { IMAGE_HAIR_PROMPT, buildHairPrompt } from "../public/hairPrompt.js";
 
 const fakeSdk = `
 export const noopLogger = {debug(){}, info(){}, warn(){}, error(){}};
@@ -55,7 +55,12 @@ const describeSpec = {
   texture: "s_wave",
   volume: "natural",
   color: "ash brown",
+  front: "lifted_up",
+  forehead: "fully_exposed",
+  sides: "above_ears",
+  top: "short",
 };
+
 
 const FORBIDDEN_REF_BUTTONS = [
   "이 스타일로 체험하기",
@@ -84,22 +89,66 @@ async function waitLive(page) {
   await expect(page.locator("#ref-capture")).toBeEnabled({ timeout: 15000 });
 }
 
+/** Deterministic single-face landmarks for browser tests (avoids loading MediaPipe wasm). */
+const faceMockInit = `
+(() => {
+  const OVAL = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
+  const BROWS = [46,52,53,55,63,65,66,70,105,107,276,282,283,285,293,295,296,300,334,336];
+  const EYES = [7,33,133,144,145,153,154,155,157,158,159,160,161,163,173,246,249,263,362,373,374,380,381,382,384,385,386,387,388,390,398,466];
+  window.__testFaceCount = 1;
+  window.__testFaceRestore = "skip";
+  window.__testDetectFaces = async () => {
+    const n = window.__testFaceCount;
+    if (n === 0) return [];
+    const one = () => {
+      const landmarks = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.52, z: 0 }));
+      OVAL.forEach((idx, i) => {
+        const t = (i / OVAL.length) * Math.PI * 2 - Math.PI / 2;
+        landmarks[idx] = { x: 0.5 + Math.cos(t) * 0.22, y: 0.52 + Math.sin(t) * 0.3, z: 0 };
+      });
+      for (const i of BROWS) landmarks[i] = { x: 0.5, y: 0.4, z: 0 };
+      for (const i of EYES) landmarks[i] = { x: 0.5, y: 0.46, z: 0 };
+      return landmarks;
+    };
+    return Array.from({ length: n }, one);
+  };
+  const origFetch = window.fetch.bind(window);
+  window.__hairPosts = [];
+  window.fetch = async (input, init) => {
+    const url = String(input);
+    if ((url.includes("/hair-preview") || url.includes("/hair-describe")) && init?.body) {
+      try { window.__hairPosts.push({ url, body: JSON.parse(init.body) }); } catch { /* ignore */ }
+    }
+    return origFetch(input, init);
+  };
+})();
+`;
+
 test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 180000 }, async (t) => {
   const config = readConfig({ SIMULATOR_MODE: "ref", TOKEN_DAILY_IP_LIMIT: "20" });
   const leads = [];
   let issued = 0;
   let previewCalls = 0;
   let failPreview = false;
+  let lastPreviewReference = null;
+  let lastDescribeImage = null;
   const previewJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 10, g: 200, b: 40 } } }).jpeg().toBuffer();
   const app = await createApp({
     config,
     logger: { error() {} },
     decart: { tokens: { create: async () => { issued++; return { apiKey: "test-client-token" }; } } },
     store: { saveLead: async (lead) => { leads.push(lead); return { imageFileId: "test-file" }; } },
-    hairVision: { describe: async () => ({ ok: true, spec: describeSpec }) },
+    hairVision: {
+      describe: async (image) => {
+        lastDescribeImage = Buffer.from(image);
+        return { ok: true, spec: describeSpec };
+      },
+    },
     hairEditor: {
-      edit: async () => {
+      edit: async ({ reference, features }) => {
         previewCalls++;
+        lastPreviewReference = Buffer.from(reference);
+        assert.ok(typeof features === "string" && features.includes("Front hair"));
         if (failPreview) throw new Error("preview fail");
         return { buffer: previewJpeg, mediaType: "image/jpeg" };
       },
@@ -116,6 +165,7 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   const browser = await launch();
   t.after(() => browser.close());
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["camera"] });
+  await context.addInitScript(faceMockInit);
   const page = await context.newPage();
   await page.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
   await page.goto(base);
@@ -152,13 +202,29 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(issued, 0, "must not connect Decart before preview finishes");
 
   await waitLive(page);
-  assert.equal(previewCalls, 1);
+  assert.equal(previewCalls, 2, "one preview request generates two Gemini candidates");
   assert.equal(issued, 1);
   await expect(page.locator("#ref-live-thumb")).toBeVisible();
   await expect(page.locator("#remaining")).toBeVisible();
   await assertNoForbidden(page);
   const liveLabels = await visibleActionLabels(page);
   assert.deepEqual(liveLabels.filter((t) => ["캡처", "종료"].includes(t)).sort(), ["캡처", "종료"].sort());
+
+  // Masked reference goes to /hair-preview; unmasked original goes to /hair-describe (never Decart).
+  assert.ok(lastDescribeImage && lastPreviewReference);
+  assert.notDeepEqual(Array.from(lastDescribeImage), Array.from(lastPreviewReference));
+  const maskedStats = await sharp(lastPreviewReference).stats();
+  assert.ok(
+    maskedStats.channels.every((c) => Math.abs(c.mean - 128) < 40) ||
+      (await sharp(lastPreviewReference).raw().toBuffer()).includes(0x80),
+    "preview reference should contain gray face mask",
+  );
+  const posts = await page.evaluate(() => window.__hairPosts);
+  const describePost = posts.find((p) => p.url.includes("/hair-describe"));
+  const previewPost = posts.find((p) => p.url.includes("/hair-preview"));
+  assert.ok(describePost && previewPost);
+  assert.notEqual(describePost.body.image, previewPost.body.reference);
+  assert.equal(previewPost.body.reference.startsWith("data:image/jpeg"), true);
 
   const initial = await page.evaluate(async () => {
     const image = window.__options.initialState.image;
@@ -172,7 +238,10 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   });
   assert.equal(initial.hasImage, true);
   assert.equal(initial.enhance, false);
-  assert.equal(initial.prompt, buildHairPrompt(describeSpec, { withImage: true }));
+  assert.equal(initial.prompt, IMAGE_HAIR_PROMPT);
+  assert.equal(initial.prompt.includes("see_through"), false);
+  assert.equal(initial.prompt.includes("layered cut"), false);
+  assert.equal(initial.prompt.includes("ash brown"), false);
   assert.deepEqual(initial.imageBytes, Array.from(previewJpeg));
   assert.notDeepEqual(initial.imageBytes, Array.from(refPng));
 
@@ -182,7 +251,7 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await expect(page.locator("#ref-consent-check")).toBeChecked();
   await page.locator("#ref-start").click();
   await waitLive(page);
-  assert.equal(previewCalls, 1, "same reference must reuse preview");
+  assert.equal(previewCalls, 2, "same reference must reuse preview");
   assert.equal(issued, 2);
   await page.locator("#ref-end").click();
 
@@ -193,8 +262,16 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await page.locator("#ref-consent-check").check();
   await page.locator("#ref-start").click();
   await waitLive(page);
-  assert.equal(previewCalls, 2, "new reference must remake preview");
+  assert.equal(previewCalls, 4, "new reference must remake preview (2 candidates)");
   await page.locator("#ref-end").click();
+
+  // Face count ≠ 1 → banner
+  await page.evaluate(() => { window.__testFaceCount = 0; });
+  const noFace = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 40, g: 40, b: 40 } } }).png().toBuffer();
+  await page.locator("#ref-file").setInputFiles({ name: "noface.png", mimeType: "image/png", buffer: noFace });
+  await expect(page.locator("#ref-stage-message")).toContainText("얼굴이 한 명만 정면으로 나온 사진을 올려주세요", { timeout: 10000 });
+  await expect(page.locator("#ref-stage-action")).toHaveText("다른 사진");
+  await page.evaluate(() => { window.__testFaceCount = 1; });
 
   // Two consecutive preview failures → simple mode
   failPreview = true;
@@ -248,6 +325,26 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(leads[0].area, "crown");
   assert.equal(leads[0].density, "2k");
 
+  // Lab debug panel is injected only on /lab
+  assert.equal(await page.locator("#ref-lab-debug").count(), 0);
+  failPreview = false;
+  const labPage = await context.newPage();
+  await labPage.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
+  await labPage.goto(`${base}/lab`);
+  const labRef = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 90, g: 60, b: 40 } } }).png().toBuffer();
+  await labPage.locator("#ref-file").setInputFiles({ name: "lab.png", mimeType: "image/png", buffer: labRef });
+  await expect(labPage.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+  await labPage.locator("#ref-consent-check").check();
+  await labPage.locator("#ref-start").click();
+  await expect(labPage.locator("#ref-live-bar")).toBeVisible({ timeout: 30000 });
+  await expect(labPage.locator("#ref-lab-debug")).toBeVisible();
+  await expect(labPage.locator("#ref-lab-gemini-ref")).toHaveAttribute("src", /data:image/);
+  await expect(labPage.locator("#ref-lab-selfie")).toHaveAttribute("src", /data:image/);
+  await expect(labPage.locator(".ref-lab-candidate img").first()).toHaveAttribute("src", /data:image/);
+  await expect(labPage.locator("#ref-lab-spec-table")).toContainText("selfie");
+  await expect(labPage.locator("#ref-lab-spec-table")).toContainText("front");
+  await expect(labPage.locator("#ref-lab-prompt")).toHaveText(IMAGE_HAIR_PROMPT);
+
   const nativePage = await context.newPage();
   await nativePage.goto(base);
   const native = await nativePage.evaluate(async () => {
@@ -255,6 +352,73 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
     return sdk.models.realtime("lucy-2.5").name;
   });
   assert.equal(native, "lucy-2.5");
+});
+
+test("browser: / and /lab (no params) share hair-preview reference and Lucy initialState", { timeout: 120000 }, async (t) => {
+  const config = readConfig({ SIMULATOR_MODE: "ref", TOKEN_DAILY_IP_LIMIT: "20" });
+  const previewJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 10, g: 200, b: 40 } } }).jpeg().toBuffer();
+  const app = await createApp({
+    config,
+    logger: { error() {} },
+    decart: { tokens: { create: async () => ({ apiKey: "parity-token" }) } },
+    store: { saveLead: async () => ({ imageFileId: "x" }) },
+    hairVision: { describe: async () => ({ ok: true, spec: describeSpec }) },
+    hairEditor: { edit: async () => ({ buffer: previewJpeg, mediaType: "image/jpeg" }) },
+  });
+  const server = await new Promise((resolve, reject) => {
+    const s = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve(s));
+    s.on("error", reject);
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  config.origin = base;
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const browser = await launch();
+  t.after(() => browser.close());
+  const refPng = await sharp({ create: { width: 360, height: 480, channels: 3, background: { r: 120, g: 90, b: 60 } } }).png().toBuffer();
+
+  async function runPath(path) {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["camera"] });
+    await context.addInitScript(faceMockInit);
+    const page = await context.newPage();
+    await page.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
+    await page.goto(`${base}${path}`);
+    await page.locator("#ref-file").setInputFiles({ name: "style.png", mimeType: "image/png", buffer: refPng });
+    await expect(page.locator("#ref-layer-ready")).toBeVisible({ timeout: 10000 });
+    await page.locator("#ref-consent-check").check();
+    await page.locator("#ref-start").click();
+    await waitLive(page);
+    const snapshot = await page.evaluate(async () => {
+      const previewPost = window.__hairPosts.find((p) => p.url.includes("/hair-preview"));
+      const image = window.__options.initialState.image;
+      const buf = image ? new Uint8Array(await image.arrayBuffer()) : null;
+      return {
+        reference: previewPost?.body?.reference || null,
+        prompt: window.__options.initialState.prompt.text,
+        enhance: window.__options.initialState.prompt.enhance,
+        hasImage: "image" in window.__options.initialState,
+        imageBytes: buf ? Array.from(buf) : null,
+        labDebugCount: document.querySelectorAll("#ref-lab-debug").length,
+      };
+    });
+    await context.close();
+    return snapshot;
+  }
+
+  const root = await runPath("/");
+  const labNoParams = await runPath("/lab");
+  assert.ok(root.reference);
+  assert.equal(root.reference, labNoParams.reference);
+  assert.equal(root.prompt, labNoParams.prompt);
+  assert.equal(root.prompt, IMAGE_HAIR_PROMPT);
+  assert.equal(root.enhance, false);
+  assert.equal(labNoParams.enhance, false);
+  assert.equal(root.hasImage, true);
+  assert.equal(labNoParams.hasImage, true);
+  assert.deepEqual(root.imageBytes, labNoParams.imageBytes);
+  assert.deepEqual(root.imageBytes, Array.from(previewJpeg));
+  assert.equal(root.labDebugCount, 0);
+  assert.equal(labNoParams.labDebugCount, 1);
 });
 
 test("browser: reference UI state screenshots", { timeout: 120000 }, async (t) => {
@@ -284,6 +448,7 @@ test("browser: reference UI state screenshots", { timeout: 120000 }, async (t) =
 
   async function shot(name, width, height, run) {
     const context = await browser.newContext({ viewport: { width, height }, permissions: ["camera"] });
+    await context.addInitScript(faceMockInit);
     const page = await context.newPage();
     await page.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
     await page.goto(base);

@@ -11,7 +11,8 @@ import { mountBrowserVendor } from "./lib/browser-vendor.js";
 import { assetAvailability } from "./lib/assets.js";
 import { createHairVision } from "./lib/hair-vision.js";
 import { createHairEditor, hairEditorInactiveReasons } from "./lib/hair-editor.js";
-import { buildHairPrompt, describeHairKo } from "./public/hairPrompt.js";
+import { runPreviewContest } from "./lib/hair-judge.js";
+import { buildEditFeatures, buildHairPrompt, describeHairKo, sanitizeHairSpec } from "./public/hairPrompt.js";
 
 const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 
@@ -109,24 +110,63 @@ export async function createApp({
       res.status(502).json({ error: "헤어를 분석하지 못했어요. 다른 사진으로 시도해 주세요." });
     }
   });
+  function resolveEditModel(requested) {
+    const trimmed = typeof requested === "string" ? requested.trim() : "";
+    if (!trimmed || trimmed === config.editModel) return { ok: true, model: config.editModel };
+    if (!config.editModelAllowlist.includes(trimmed)) return { ok: false };
+    return { ok: true, model: trimmed };
+  }
+
   app.post("/hair-preview", async (req, res) => {
     res.set("Cache-Control", "no-store");
-    if (!editor) return res.status(503).json({ error: "미리보기를 만들 수 없어요." });
+    if (!editor || !vision) return res.status(503).json({ error: "미리보기를 만들 수 없어요." });
+    const modelChoice = resolveEditModel(req.body?.editModel);
+    if (!modelChoice.ok) return res.status(400).json({ error: "허용되지 않은 편집 모델입니다." });
+    const previewEditor = modelChoice.model === config.editModel && editor
+      ? editor
+      : createHairEditor({ provider: config.editProvider, model: modelChoice.model, apiKey: config.geminiKey });
+    if (!previewEditor) return res.status(503).json({ error: "미리보기를 만들 수 없어요." });
     const person = parseDataImage(req.body?.person, PREVIEW_MAX_BYTES);
     if (person.status) return res.status(person.status).json({ error: person.error });
     const reference = parseDataImage(req.body?.reference, PREVIEW_MAX_BYTES);
     if (reference.status) return res.status(reference.status).json({ error: reference.error });
+    const sanitized = sanitizeHairSpec(req.body?.spec);
+    if (!sanitized.ok || !sanitized.spec.hairVisible) {
+      return res.status(400).json({ error: "헤어 정보가 올바르지 않아요." });
+    }
+    const features = buildEditFeatures(sanitized.spec);
     const reservation = previewQuota.reserve(req.ip);
     if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
     const started = Date.now();
     try {
-      const result = await editor.edit({
+      const result = await runPreviewContest({
+        editor: previewEditor,
+        vision,
         person: person.buffer,
         reference: reference.buffer,
+        referenceSpec: sanitized.spec,
+        features,
         mediaType: "image/jpeg",
+        timeoutMs: 90000,
+        labDebug: req.body?.labDebug === true,
       });
-      logger.info?.("hair-preview", { ok: true, ms: Date.now() - started });
-      res.json({ image: `data:image/jpeg;base64,${result.buffer.toString("base64")}` });
+      logger.info?.("hair-preview", {
+        ok: true,
+        ms: result.ms ?? (Date.now() - started),
+        attempts: result.attempts,
+        scores: result.scores,
+        selectedIndex: result.selectedIndex,
+      });
+      res.json({
+        image: `data:image/jpeg;base64,${result.buffer.toString("base64")}`,
+        scores: result.scores,
+        attempts: result.attempts,
+        selectedIndex: result.selectedIndex,
+        candidates: result.candidates,
+        reference: result.reference,
+        person: result.person,
+        editModel: modelChoice.model,
+      });
     } catch {
       reservation.release();
       logger.info?.("hair-preview", { ok: false, ms: Date.now() - started });
