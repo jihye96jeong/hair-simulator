@@ -47,7 +47,7 @@ npm start
 | --- | --- | --- |
 | `DECART_API_KEY` | (없음) | 서버 전용 Decart 키. 브라우저에 내려주지 않습니다. |
 | `ANTHROPIC_API_KEY` | (없음) | 레퍼런스 헤어 묘사. 없으면 `/hair-describe`는 503입니다. |
-| `HAIR_VISION_MODEL` | `claude-haiku-4-5-20251001` | 비전 묘사 모델 |
+| `HAIR_VISION_MODEL` | `claude-sonnet-5-5` | 비전 묘사 모델 |
 | `HAIR_DESCRIBE_DAILY_IP_LIMIT` | 20 | IP당 하루 묘사 횟수 |
 | `HAIR_DESCRIBE_DAILY_TOTAL_LIMIT` | 500 | 전체 하루 묘사 횟수 |
 | `HAIR_EDIT_PROVIDER` | `gemini` | 미리보기 편집 공급자 |

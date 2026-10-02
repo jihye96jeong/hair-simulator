@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import {
   GUIDE_INSET_SIDE,
   GUIDE_INSET_TOP,
+  aspectRatioForLength,
   clampRect,
   coverMapping,
   cropRectFromGuide,
   displayCropToVideo,
   faceGuideEllipse,
+  identityCropFromGuide,
 } from "../public/selfie.js";
 
 test("faceGuideEllipse matches CSS inset 12% 18%", () => {
@@ -18,13 +20,36 @@ test("faceGuideEllipse matches CSS inset 12% 18%", () => {
   assert.equal(e.height, 500 * (1 - 2 * GUIDE_INSET_TOP));
 });
 
-test("cropRectFromGuide is 3:4 and starts above the ellipse", () => {
+test("cropRectFromGuide is 3:4 by default and 2:3 for long styles, same top", () => {
   const ellipse = { left: 72, top: 60, width: 256, height: 380 };
-  const crop = cropRectFromGuide(ellipse);
-  assert.ok(Math.abs(crop.width - 256 * 2.2) < 1e-9);
-  assert.ok(Math.abs(crop.height - crop.width * 4 / 3) < 1e-9);
-  assert.ok(Math.abs(crop.top - (60 - 380 * 0.9)) < 1e-9);
-  assert.ok(Math.abs(crop.left + crop.width / 2 - (72 + 128)) < 1e-9);
+  const crop34 = cropRectFromGuide(ellipse);
+  assert.ok(Math.abs(crop34.width - 256 * 2.2) < 1e-9);
+  assert.ok(Math.abs(crop34.height - crop34.width * 4 / 3) < 1e-9);
+  assert.ok(Math.abs(crop34.top - (60 - 380 * 0.9)) < 1e-9);
+  assert.ok(Math.abs(crop34.left + crop34.width / 2 - (72 + 128)) < 1e-9);
+
+  const crop23 = cropRectFromGuide(ellipse, { aspectRatio: "2:3" });
+  assert.ok(Math.abs(crop23.width - crop34.width) < 1e-9);
+  assert.ok(Math.abs(crop23.height - crop23.width * 3 / 2) < 1e-9);
+  assert.equal(crop23.top, crop34.top);
+  assert.ok(crop23.height > crop34.height);
+});
+
+test("aspectRatioForLength maps chest/long to 2:3; shoulder and shorter stay 3:4", () => {
+  assert.equal(aspectRatioForLength("short"), "3:4");
+  assert.equal(aspectRatioForLength("chin"), "3:4");
+  assert.equal(aspectRatioForLength("shoulder"), "3:4");
+  assert.equal(aspectRatioForLength("chest"), "2:3");
+  assert.equal(aspectRatioForLength("long"), "2:3");
+});
+
+test("identityCropFromGuide is 1:1 centered on the ellipse at 1.4× width", () => {
+  const ellipse = { left: 72, top: 60, width: 256, height: 380 };
+  const id = identityCropFromGuide(ellipse);
+  assert.ok(Math.abs(id.width - 256 * 1.4) < 1e-9);
+  assert.equal(id.width, id.height);
+  assert.ok(Math.abs(id.left + id.width / 2 - (72 + 128)) < 1e-9);
+  assert.ok(Math.abs(id.top + id.height / 2 - (60 + 190)) < 1e-9);
 });
 
 test("coverMapping centers a landscape video in a portrait element", () => {

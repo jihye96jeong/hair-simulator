@@ -5,9 +5,19 @@ export const GUIDE_INSET_TOP = 0.12;
 export const GUIDE_INSET_SIDE = 0.18;
 export const SELFIE_OUT_WIDTH = 768;
 export const SELFIE_OUT_HEIGHT = 1024;
+/** 2:3 output height for chest / long crops (width stays SELFIE_OUT_WIDTH). */
+export const SELFIE_OUT_HEIGHT_TALL = 1152;
 export const SELFIE_JPEG_QUALITY = 0.9;
 export const CROP_WIDTH_FACTOR = 2.2;
 export const CROP_TOP_FACTOR = 0.9;
+export const IDENTITY_CROP_FACTOR = 1.4;
+export const IDENTITY_OUT_SIZE = 512;
+export const LONG_CROP_LENGTHS = Object.freeze(["chest", "long"]);
+
+/** Gemini / crop aspect from reference hair length. */
+export function aspectRatioForLength(length) {
+  return LONG_CROP_LENGTHS.includes(length) ? "2:3" : "3:4";
+}
 
 /**
  * object-fit: cover mapping from element box → source video pixels.
@@ -33,16 +43,32 @@ export function faceGuideEllipse(elementW, elementH) {
   };
 }
 
-/** 3:4 crop box in element coordinates, anchored above the guide ellipse. */
-export function cropRectFromGuide(ellipse) {
+/**
+ * Face-centered crop in element coordinates, anchored above the guide ellipse.
+ * Default 3:4; chest/long styles use 2:3 by extending downward.
+ */
+export function cropRectFromGuide(ellipse, { aspectRatio = "3:4" } = {}) {
   const width = ellipse.width * CROP_WIDTH_FACTOR;
-  const height = width * (4 / 3);
+  const height = aspectRatio === "2:3" ? width * (3 / 2) : width * (4 / 3);
   const centerX = ellipse.left + ellipse.width / 2;
   return {
     left: centerX - width / 2,
     top: ellipse.top - ellipse.height * CROP_TOP_FACTOR,
     width,
     height,
+  };
+}
+
+/** 1:1 identity close-up centered on the face guide ellipse. */
+export function identityCropFromGuide(ellipse) {
+  const size = ellipse.width * IDENTITY_CROP_FACTOR;
+  const centerX = ellipse.left + ellipse.width / 2;
+  const centerY = ellipse.top + ellipse.height / 2;
+  return {
+    left: centerX - size / 2,
+    top: centerY - size / 2,
+    width: size,
+    height: size,
   };
 }
 
@@ -98,7 +124,7 @@ export function displayCropToVideo({
 
 /**
  * Local front-camera selfie for hair preview (no Decart, no billing).
- * Capture is face-centered 3:4 JPEG; on-screen preview may still CSS-mirror.
+ * Capture is face-centered 3:4 or 2:3 JPEG; on-screen preview may still CSS-mirror.
  */
 export function createSelfieCapture({ video, overlay, onStatus = () => {} } = {}) {
   let stream = null;
@@ -128,18 +154,22 @@ export function createSelfieCapture({ video, overlay, onStatus = () => {} } = {}
     if (overlay) overlay.hidden = true;
   }
 
-  async function capture() {
+  async function capture({ length } = {}) {
     if (!video || !video.videoWidth) {
       const error = new Error("카메라 화면을 아직 준비하지 못했어요.");
       error.code = "selfie-not-ready";
       throw error;
     }
+    const aspectRatio = aspectRatioForLength(length);
+    const outWidth = SELFIE_OUT_WIDTH;
+    const outHeight = aspectRatio === "2:3" ? SELFIE_OUT_HEIGHT_TALL : SELFIE_OUT_HEIGHT;
     const elementW = video.clientWidth || video.videoWidth;
     const elementH = video.clientHeight || video.videoHeight;
     const videoW = video.videoWidth;
     const videoH = video.videoHeight;
     const ellipse = faceGuideEllipse(elementW, elementH);
-    const cropDisplay = cropRectFromGuide(ellipse);
+    const cropDisplay = cropRectFromGuide(ellipse, { aspectRatio });
+    const identityDisplay = identityCropFromGuide(ellipse);
     const src = displayCropToVideo({
       crop: cropDisplay,
       elementW,
@@ -148,10 +178,18 @@ export function createSelfieCapture({ video, overlay, onStatus = () => {} } = {}
       videoH,
       mirrored: true,
     });
+    const identitySrc = displayCropToVideo({
+      crop: identityDisplay,
+      elementW,
+      elementH,
+      videoW,
+      videoH,
+      mirrored: true,
+    });
 
     const canvas = document.createElement("canvas");
-    canvas.width = SELFIE_OUT_WIDTH;
-    canvas.height = SELFIE_OUT_HEIGHT;
+    canvas.width = outWidth;
+    canvas.height = outHeight;
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       const error = new Error("촬영에 실패했습니다.");
@@ -162,15 +200,34 @@ export function createSelfieCapture({ video, overlay, onStatus = () => {} } = {}
     ctx.drawImage(
       video,
       src.x, src.y, src.w, src.h,
-      0, 0, SELFIE_OUT_WIDTH, SELFIE_OUT_HEIGHT,
+      0, 0, outWidth, outHeight,
     );
     const dataUrl = canvas.toDataURL("image/jpeg", SELFIE_JPEG_QUALITY);
+
+    const identityCanvas = document.createElement("canvas");
+    identityCanvas.width = IDENTITY_OUT_SIZE;
+    identityCanvas.height = IDENTITY_OUT_SIZE;
+    const identityCtx = identityCanvas.getContext("2d");
+    if (!identityCtx) {
+      const error = new Error("촬영에 실패했습니다.");
+      error.code = "selfie-encode-failed";
+      throw error;
+    }
+    identityCtx.drawImage(
+      video,
+      identitySrc.x, identitySrc.y, identitySrc.w, identitySrc.h,
+      0, 0, IDENTITY_OUT_SIZE, IDENTITY_OUT_SIZE,
+    );
+    const identityDataUrl = identityCanvas.toDataURL("image/jpeg", SELFIE_JPEG_QUALITY);
     stop();
     return {
       dataUrl,
-      width: SELFIE_OUT_WIDTH,
-      height: SELFIE_OUT_HEIGHT,
+      identityDataUrl,
+      width: outWidth,
+      height: outHeight,
+      aspectRatio,
       crop: src,
+      identityCrop: identitySrc,
     };
   }
 

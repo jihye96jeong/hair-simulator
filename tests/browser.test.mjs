@@ -145,10 +145,10 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
       },
     },
     hairEditor: {
-      edit: async ({ reference, features }) => {
+      edit: async ({ reference, identity }) => {
         previewCalls++;
         lastPreviewReference = Buffer.from(reference);
-        assert.ok(typeof features === "string" && features.includes("Front hair"));
+        assert.ok(identity, "identity close-up should be sent to Gemini");
         if (failPreview) throw new Error("preview fail");
         return { buffer: previewJpeg, mediaType: "image/jpeg" };
       },
@@ -225,6 +225,7 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.ok(describePost && previewPost);
   assert.notEqual(describePost.body.image, previewPost.body.reference);
   assert.equal(previewPost.body.reference.startsWith("data:image/jpeg"), true);
+  assert.ok(previewPost.body.identity?.startsWith("data:image/jpeg"));
   assert.equal(previewPost.body.guide, undefined);
   assert.equal(previewPost.body.hairOnly, undefined);
   assert.equal(previewPost.body.editMask, undefined);
@@ -347,6 +348,10 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await expect(labPage.locator(".ref-lab-candidate figcaption").first()).toContainText("front:");
   await expect(labPage.locator(".ref-lab-candidate figcaption").first()).toContainText("forehead:");
   await expect(labPage.locator(".ref-lab-candidate figcaption").first()).toContainText("sides:");
+  await expect(labPage.locator("#ref-lab-prompt")).toContainText("spec.length=shoulder");
+  await expect(labPage.locator("#ref-lab-prompt")).toContainText("crop=3:4");
+  await expect(labPage.locator("#ref-lab-prompt")).toContainText("geminiAspect=3:4");
+  await expect(labPage.locator("#ref-lab-identity")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-prompt")).toContainText("enhance=false");
   await expect(labPage.locator("#ref-lab-prompt")).toContainText(IMAGE_HAIR_PROMPT);
 

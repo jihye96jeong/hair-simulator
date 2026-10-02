@@ -12,12 +12,17 @@ import { assetAvailability } from "./lib/assets.js";
 import { createHairVision } from "./lib/hair-vision.js";
 import { createHairEditor, hairEditorInactiveReasons } from "./lib/hair-editor.js";
 import { runPreviewContest } from "./lib/hair-judge.js";
-import { buildEditFeatures, buildHairPrompt, describeHairKo, sanitizeHairSpec } from "./public/hairPrompt.js";
+import { buildHairPrompt, describeHairKo, sanitizeHairSpec } from "./public/hairPrompt.js";
 
 const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 
 const DESCRIBE_MAX_BYTES = 2 * 1024 * 1024;
 const PREVIEW_MAX_BYTES = Math.floor(1.2 * 1024 * 1024);
+
+function parseOptionalDataImage(image, maxBytes) {
+  if (image == null || image === "") return { buffer: null, mediaType: null };
+  return parseDataImage(image, maxBytes);
+}
 
 function parseDataImage(image, maxBytes) {
   if (typeof image !== "string") return { status: 400, error: "이미지 형식을 확인해 주세요." };
@@ -134,7 +139,8 @@ export async function createApp({
     if (!sanitized.ok || !sanitized.spec.hairVisible) {
       return res.status(400).json({ error: "헤어 정보가 올바르지 않아요." });
     }
-    const features = buildEditFeatures(sanitized.spec);
+    const identity = parseOptionalDataImage(req.body?.identity, PREVIEW_MAX_BYTES);
+    if (identity.status) return res.status(identity.status).json({ error: identity.error });
     const reservation = previewQuota.reserve(req.ip);
     if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
     const started = Date.now();
@@ -145,8 +151,9 @@ export async function createApp({
         person: person.buffer,
         reference: reference.buffer,
         referenceSpec: sanitized.spec,
-        features,
+        identity: identity.buffer || undefined,
         mediaType: "image/jpeg",
+        identityMediaType: identity.mediaType || "image/jpeg",
         timeoutMs: 90000,
         labDebug: req.body?.labDebug === true,
       });

@@ -4,7 +4,7 @@ import { CAP_SECONDS, REFERENCE_SESSION_KEY } from "./shared.js";
 import { RealtimeSession } from "./session.js";
 import { openFrontCamera, stopMediaStream } from "./camera.js";
 import { captureFrame, downloadCapture } from "./capture.js";
-import { createSelfieCapture } from "./selfie.js";
+import { aspectRatioForLength, createSelfieCapture } from "./selfie.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -56,6 +56,7 @@ export function createReferenceFlow({
   let describeReady = false;
   let describeError = null;
   let selfieDataUrl = "";
+  let identityDataUrl = "";
   let previewBlob = null;
   let previewDataUrl = "";
   let previewScores = [];
@@ -63,6 +64,7 @@ export function createReferenceFlow({
   let previewCandidates = [];
   let previewReferenceCore = null;
   let previewFailCount = 0;
+  let captureAspectRatio = "";
   let consented = false;
   let detailOpen = false;
   let countdownTimer = null;
@@ -189,12 +191,14 @@ export function createReferenceFlow({
     attachLabMediaActions(maskedFig, "0 masked reference", "00-masked-reference.jpg");
     const selfieFig = mkFigure("ref-lab-selfie", "크롭 촬영본");
     attachLabMediaActions(selfieFig, "1 selfie crop", "01-selfie.jpg");
+    const identityFig = mkFigure("ref-lab-identity", "얼굴 클로즈업");
+    attachLabMediaActions(identityFig, "1b identity close-up", "01b-identity.jpg");
     const candidatesEl = document.createElement("div");
     candidatesEl.id = "ref-lab-candidates";
     candidatesEl.className = "ref-lab-candidates";
     const promptEl = document.createElement("pre");
     promptEl.id = "ref-lab-prompt";
-    panel.append(maskedFig, selfieFig, candidatesEl, promptEl);
+    panel.append(maskedFig, selfieFig, identityFig, candidatesEl, promptEl);
     $("stage").insertAdjacentElement("afterend", panel);
     labDebug = panel;
     return panel;
@@ -212,6 +216,7 @@ export function createReferenceFlow({
     };
     setSrc("#ref-lab-masked", maskedReferenceDataUrl);
     setSrc("#ref-lab-selfie", selfieDataUrl);
+    setSrc("#ref-lab-identity", identityDataUrl);
     const candidatesEl = panel.querySelector("#ref-lab-candidates");
     const promptEl = panel.querySelector("#ref-lab-prompt");
     candidatesEl.innerHTML = "";
@@ -239,7 +244,15 @@ export function createReferenceFlow({
     }
     const promptText = prompt ?? lastLucyPrompt;
     const enhanceVal = enhance ?? lastLucyEnhance;
-    promptEl.textContent = `3 Lucy prompt / enhance\nenhance=${enhanceVal}\n${promptText}`;
+    const length = hairSpec?.length || "—";
+    const cropAspect = captureAspectRatio || (hairSpec?.length ? aspectRatioForLength(hairSpec.length) : "—");
+    const geminiAspect = hairSpec?.length ? aspectRatioForLength(hairSpec.length) : "—";
+    promptEl.textContent = [
+      `spec.length=${length} crop=${cropAspect} geminiAspect=${geminiAspect}`,
+      `3 Lucy prompt / enhance`,
+      `enhance=${enhanceVal}`,
+      promptText,
+    ].join("\n");
   }
 
   function showLabDebug(on) {
@@ -316,6 +329,8 @@ export function createReferenceFlow({
     previewCandidates = [];
     previewReferenceCore = null;
     previewFailCount = 0;
+    captureAspectRatio = "";
+    identityDataUrl = "";
   }
 
   function resetDescribe() {
@@ -514,6 +529,7 @@ export function createReferenceFlow({
       labDebug: isLab,
       editModel: opts.editmodel || undefined,
     };
+    if (identityDataUrl) payload.identity = identityDataUrl;
     const response = await fetch("/hair-preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -668,13 +684,24 @@ export function createReferenceFlow({
       });
       if (seq !== runSeq || uploadSeq !== uploadAtStart || !isActive()) return;
 
-      const shot = await selfie.capture();
+      $("ref-countdown").hidden = false;
+      $("ref-countdown").textContent = "헤어 분석 중…";
+      const okDescribe = await waitDescribe(uploadAtStart);
+      clearCountdown();
+      if (!okDescribe || seq !== runSeq || uploadSeq !== uploadAtStart) return;
+      if (!hairSpec?.length) {
+        setUiState("ready");
+        showBanner("헤어 분석을 마치지 못했어요.", "다시 시도", () => startExperience());
+        return;
+      }
+
+      const shot = await selfie.capture({ length: hairSpec.length });
+      captureAspectRatio = shot.aspectRatio || aspectRatioForLength(hairSpec.length);
       selfieDataUrl = shot.dataUrl;
+      identityDataUrl = shot.identityDataUrl || "";
       $("ref-freeze").src = selfieDataUrl;
       setUiState("generating");
-
-      const okDescribe = await waitDescribe(uploadAtStart);
-      if (!okDescribe || seq !== runSeq || uploadSeq !== uploadAtStart) return;
+      updateLabDebug();
 
       let imageBlob = null;
       let useImage = !forceText && !textMode();

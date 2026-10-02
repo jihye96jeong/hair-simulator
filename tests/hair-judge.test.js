@@ -80,7 +80,6 @@ test("runPreviewContest picks higher match without regenerate", async () => {
     person: Buffer.from("p"),
     reference: Buffer.from("r"),
     referenceSpec: ref,
-    features: "Target",
     labDebug: true,
   });
   assert.equal(edits, 2);
@@ -105,7 +104,6 @@ test("runPreviewContest returns a buffer when both candidates score 0", async ()
     person: Buffer.from("p"),
     reference: Buffer.from("r"),
     referenceSpec: ref,
-    features: "Target",
   });
   assert.equal(edits, 2);
   assert.equal(result.selectedIndex, 0);

@@ -48,36 +48,6 @@ const VOLUME_EN = {
   natural: "natural",
   voluminous: "voluminous",
 };
-const FRONT_EN = {
-  lifted_up: "Front hair lifted up",
-  falls_down: "Front hair falls down",
-  swept_to_side: "Front hair swept to the side",
-  parted_curtain: "Front hair parted curtain-style",
-};
-const FOREHEAD_EN = {
-  fully_exposed: "forehead fully exposed",
-  partly_exposed: "forehead partly exposed",
-  covered: "forehead covered",
-};
-const SIDES_EN = {
-  above_ears: "sides above the ears",
-  half_over_ears: "sides half over the ears",
-  over_ears: "sides over the ears",
-};
-const TOP_EN = {
-  very_short: "very short top",
-  short: "short top",
-  medium: "medium top",
-  long: "long top",
-};
-const TEXTURE_EDIT_EN = {
-  straight: "straight strands",
-  c_curl: "soft C-curl strands",
-  s_wave: "soft S-wave strands",
-  curly: "curly strands",
-  permed: "permed strands",
-  messy_textured: "messy textured strands",
-};
 
 const LENGTH_KO = {
   buzz: "버즈",
@@ -181,24 +151,6 @@ export function sanitizeHairSpec(raw) {
       top: raw.top,
     },
   };
-}
-
-/** One English sentence of edit targets from sanitized enum fields only. */
-export function buildEditFeatures(spec) {
-  const bangs = spec.bangs === "none" ? "no bangs" : BANGS_EN[spec.bangs];
-  const part = spec.part === "none" ? "no part" : PART_EN[spec.part];
-  return [
-    FRONT_EN[spec.front],
-    FOREHEAD_EN[spec.forehead],
-    bangs,
-    part,
-    `${LENGTH_EN[spec.length]} overall length`,
-    SIDES_EN[spec.sides],
-    TOP_EN[spec.top],
-    `${VOLUME_EN[spec.volume]} volume`,
-    TEXTURE_EDIT_EN[spec.texture],
-    `${spec.color} color.`,
-  ].join(", ");
 }
 
 export function buildHairPrompt(spec, { withImage = false } = {}) {

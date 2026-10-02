@@ -2,16 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   HAIR_BANGS,
-  HAIR_FOREHEADS,
-  HAIR_FRONTS,
   HAIR_LENGTHS,
   HAIR_PARTS,
-  HAIR_SIDES,
   HAIR_TEXTURES,
-  HAIR_TOPS,
   HAIR_VOLUMES,
   IMAGE_HAIR_PROMPT,
-  buildEditFeatures,
   buildHairPrompt,
   describeHairKo,
   sanitizeHairSpec,
@@ -57,32 +52,6 @@ test("sanitizeHairSpec rejects enums, uppercase, special characters, and oversiz
     Object.keys(sanitizeHairSpec(spec()).spec).sort(),
     ["bangs", "color", "cut", "forehead", "front", "hairVisible", "length", "part", "sides", "texture", "top", "volume"],
   );
-});
-
-test("buildEditFeatures uses only sanitized enum phrases", () => {
-  const features = buildEditFeatures(spec({
-    front: "lifted_up",
-    forehead: "fully_exposed",
-    sides: "above_ears",
-    top: "short",
-    texture: "messy_textured",
-    color: "dark brown",
-  }));
-  assert.equal(
-    features,
-    "Front hair lifted up, forehead fully exposed, light see-through bangs, no part, shoulder-length overall length, sides above the ears, short top, natural volume, messy textured strands, dark brown color.",
-  );
-  for (const front of HAIR_FRONTS) {
-    for (const forehead of HAIR_FOREHEADS) {
-      for (const sides of HAIR_SIDES) {
-        for (const top of HAIR_TOPS) {
-          const line = buildEditFeatures(spec({ front, forehead, sides, top, texture: "straight", color: "black" }));
-          assert.ok(line.endsWith("black color."));
-          assert.equal(line.includes("_"), false);
-        }
-      }
-    }
-  }
 });
 
 test("buildHairPrompt stays within 750 characters and never uses Do not", () => {
