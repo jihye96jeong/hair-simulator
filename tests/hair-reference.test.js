@@ -16,12 +16,12 @@ test("reference file validation matches UI limits", () => {
 
 test("session-end accepts reference experienceType without weakening presets", () => {
   const base = { reason: "manual", billedSeconds: 12, wallSeconds: 13, switches: 1, captured: false };
-  assert.equal(validateSession({ ...base, combo: "2k" }).experienceType, "preset");
+  assert.equal(validateSession({ ...base, combo: "hairline_2k" }).experienceType, "preset");
   assert.equal(validateSession({ ...base, combo: "reference", experienceType: "reference" }).combo, "reference");
   assert.throws(() => validateSession({ ...base, combo: "partial", experienceType: "reference" }), ValidationError);
   assert.throws(() => validateSession({ ...base, combo: "reference" }), ValidationError);
   assert.throws(() => validateSession({ ...base, combo: "anything", experienceType: "reference" }), ValidationError);
-  assert.throws(() => validateSession({ ...base, combo: "2k", experienceType: "other" }), ValidationError);
+  assert.throws(() => validateSession({ ...base, combo: "hairline_2k", experienceType: "other" }), ValidationError);
 });
 
 test("Decart image path only uses preview blob, never raw reference upload variable", async () => {

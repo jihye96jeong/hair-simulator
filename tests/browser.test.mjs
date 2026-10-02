@@ -97,6 +97,7 @@ const faceMockInit = `
   const EYES = [7,33,133,144,145,153,154,155,157,158,159,160,161,163,173,246,249,263,362,373,374,380,381,382,384,385,386,387,388,390,398,466];
   window.__testFaceCount = 1;
   window.__testFaceRestore = "skip";
+  window.__testGraftCountdownMs = 20;
   window.__testDetectFaces = async () => {
     const n = window.__testFaceCount;
     if (n === 0) return [];
@@ -111,6 +112,61 @@ const faceMockInit = `
       return landmarks;
     };
     return Array.from({ length: n }, one);
+  };
+  window.__testGraftMeasure = async (source, { pose = "front" } = {}) => {
+    const width = source.videoWidth || source.width || 320;
+    const height = source.videoHeight || source.height || 480;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#c8a090";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#2a1a12";
+    ctx.fillRect(0, 0, width, Math.floor(height * 0.28));
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const hairMask = new Uint8Array(width * height);
+    const faceMask = new Uint8Array(width * height);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        if (y < height * 0.28) hairMask[i] = 1;
+        else if (y < height * 0.75) faceMask[i] = 1;
+      }
+    }
+    if (pose === "crown") {
+      for (let y = Math.floor(height * 0.18); y < Math.floor(height * 0.32); y++) {
+        for (let x = Math.floor(width * 0.4); x < Math.floor(width * 0.6); x++) {
+          faceMask[y * width + x] = 1;
+          const o = (y * width + x) * 4;
+          imageData.data[o] = 210; imageData.data[o + 1] = 190; imageData.data[o + 2] = 170;
+        }
+      }
+      return {
+        measure: {
+          kind: "crown", width, height,
+          headWidthPx: width * 0.7,
+          pxPerCm: (width * 0.7) / 15,
+          crownCenter: { x: width / 2, y: height * 0.25 },
+        },
+        hairMask, faceMask, frameCanvas: canvas, imageData,
+      };
+    }
+    const curve = [];
+    for (let i = 0; i < 24; i++) {
+      curve.push({ x: (i / 23) * (width - 1), y: height * 0.26 + Math.sin(i / 4) * 2 });
+    }
+    return {
+      measure: {
+        kind: "front", width, height,
+        pxPerCm: 12,
+        browTopY: height * 0.4,
+        hairlineCurve: curve,
+        templeLeft: { x: width * 0.2, y: height * 0.26 },
+        templeRight: { x: width * 0.8, y: height * 0.26 },
+      },
+      hairMask, faceMask, frameCanvas: canvas, imageData,
+    };
   };
   const origFetch = window.fetch.bind(window);
   window.__hairPosts = [];
@@ -133,6 +189,8 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   let lastPreviewReference = null;
   let lastDescribeImage = null;
   const previewJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 10, g: 200, b: 40 } } }).jpeg().toBuffer();
+  const graftJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 40, g: 20, b: 10 } } }).jpeg().toBuffer();
+  let graftInpaintCalls = 0;
   const app = await createApp({
     config,
     logger: { error() {} },
@@ -151,6 +209,20 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
         assert.ok(identity, "identity close-up should be sent to Gemini");
         if (failPreview) throw new Error("preview fail");
         return { buffer: previewJpeg, mediaType: "image/jpeg" };
+      },
+    },
+    graftInpaint: {
+      meta: { id: "gemini-3-pro-image", estimatedCostUsd: 0.04 },
+      inpaint: async () => {
+        graftInpaintCalls++;
+        return {
+          buffer: graftJpeg,
+          mediaType: "image/jpeg",
+          model: "gemini-3-pro-image",
+          ms: 5,
+          estimatedCostUsd: 0.04,
+          densityLabel: "medium",
+        };
       },
     },
   });
@@ -301,22 +373,59 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(textInitial.prompt, buildHairPrompt(describeSpec, { withImage: false }));
   await page.locator("#ref-end").click();
 
-  // Preset mode regression
+  // Preset (모수): silent measure → server inpaint still → Lucy (no capture countdown UI)
   await page.locator("#tab-preset").click();
   await expect(page.locator("#preset-bar")).toBeVisible();
+  await expect(page.locator("#graft-disclaimer")).toBeVisible();
+  await expect(page.locator("#graft-disclaimer")).toHaveText("참고용 시뮬레이션이며 실제 시술 결과와 다를 수 있습니다.");
+  await expect(page.locator("#stage-label")).toContainText("부위와 모량을 고른 뒤 연결을 누르세요");
+  await expect(page.locator("#ref-layer-idle")).toBeHidden();
   await expect(page.locator("#drop")).toBeHidden();
-  await page.locator('#preset-bar [data-combo="1k"]').click();
-  await page.locator('#preset-bar [data-area="crown"]').click();
-  await expect(page.locator('#preset-bar [data-combo="crown_1k"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("따라하고 싶은 헤어 사진을 올려주세요")).toBeHidden();
+  await expect(page.getByText("부위와 모량을 고른 뒤 연결을 누르세요")).toBeVisible();
+
+  await page.locator('#preset-bar [data-graft-area="hairline"]').click();
+  await page.locator('#preset-bar [data-graft-level="2000"]').click();
   await page.locator("#connect").click();
-  await expect(page.locator("#save-result")).toBeEnabled();
-  await page.locator('#preset-bar [data-combo="crown_2k"]').click();
-  await expect(page.locator("#combo-label")).toHaveText("정수리 · 2천 모");
-  await page.evaluate(() => { window.__rejectSet = true; });
-  await page.locator('#preset-bar [data-area="hairline"]').click();
-  await expect(page.locator("#error")).toContainText("헤어 참고 이미지 변경에 실패");
-  await expect(page.locator('#preset-bar [data-area="crown"]')).toHaveAttribute("aria-pressed", "true");
-  await page.evaluate(() => { window.__rejectSet = false; });
+  await expect(page.locator("#save-result")).toBeEnabled({ timeout: 25000 });
+  await expect(page.locator("#graft-capture-layer")).toBeHidden();
+  await expect(page.locator("#graft-countdown")).toBeHidden();
+  await expect(page.locator("#combo-label")).toContainText("헤어라인");
+  await expect(page.locator("#combo-label")).toContainText("2,000모");
+  await expect(page.locator("#graft-disclaimer")).toBeVisible();
+  assert.ok(graftInpaintCalls >= 1);
+
+  const graftInitial = await page.evaluate(() => ({
+    prompt: window.__options.initialState.prompt.text,
+    enhance: window.__options.initialState.prompt.enhance,
+    hasImage: "image" in window.__options.initialState,
+  }));
+  assert.equal(graftInitial.enhance, false);
+  assert.equal(graftInitial.hasImage, true);
+  assert.ok(graftInitial.prompt.includes("hairline exactly at the position"));
+
+  const callsBeforeSwitch = graftInpaintCalls;
+  await page.locator('#preset-bar [data-graft-level="3000"]').click();
+  await expect(page.locator("#combo-label")).toContainText("3,000모");
+  await expect.poll(() => graftInpaintCalls).toBeGreaterThan(callsBeforeSwitch);
+  await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(0);
+  const setPayload = await page.evaluate(() => window.__sets.at(-1));
+  assert.equal(setPayload.enhance, false);
+  assert.ok(typeof setPayload.prompt === "string");
+  assert.ok(setPayload.image);
+  assert.ok(setPayload.prompt.includes("hairline exactly at the position"));
+
+  const setsBeforeCrown = await page.evaluate(() => window.__sets.length);
+  const callsBeforeCrown = graftInpaintCalls;
+  await page.locator('#preset-bar [data-graft-area="crown"]').click();
+  await expect(page.locator("#combo-label")).toContainText("정수리", { timeout: 25000 });
+  await expect.poll(() => graftInpaintCalls).toBeGreaterThan(callsBeforeCrown);
+  await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(setsBeforeCrown);
+  const crownSet = await page.evaluate(() => window.__sets.at(-1));
+  assert.equal(crownSet.enhance, false);
+  assert.ok(crownSet.prompt.includes("crown hair density"));
+  assert.ok(crownSet.image);
+
   await page.locator("#save-result").click();
   await expect(page.locator("#contact")).toBeVisible();
   await page.locator("#name").fill("테스트");
@@ -327,10 +436,11 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await expect(page.locator("#complete")).toBeVisible();
   assert.equal(leads.length, 1);
   assert.equal(leads[0].area, "crown");
-  assert.equal(leads[0].density, "2k");
+  assert.equal(leads[0].density, "3k");
 
   // Lab debug panel is injected only on /lab
   assert.equal(await page.locator("#ref-lab-debug").count(), 0);
+  assert.equal(await page.locator("#graft-lab-debug").count(), 0);
   failPreview = false;
   const labPage = await context.newPage();
   await labPage.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));

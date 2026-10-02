@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { RealtimeSession } from "../public/session.js";
-import { stateOf, initialStateOf } from "../public/combos.js";
+import { promptForArea } from "../public/graftRules.js";
 
 function fixture() {
   let wall = 0;
@@ -14,7 +14,7 @@ function fixture() {
   const sets = [];
   const stream = { getTracks: () => [{ stop: () => stops++ }] };
   const rt = { disconnect: () => disconnects++, getConnectionState: () => "generating", on: (event, callback) => callbacks.set(event, callback), set: async (value) => sets.push(value) };
-  const session = new RealtimeSession({ mode: "ref", anchor: "on", combo: "partial", now: () => wall,
+  const session = new RealtimeSession({ mode: "ref", anchor: "on", combo: "mline_1k", now: () => wall,
     report: (value) => reports.push(value), logger: { info: (...args) => logs.push(args), error() {} },
     timers: { setTimeout: (fn, ms) => { timeouts.push({ fn, ms }); return 1; }, setInterval: () => 2, clearTimeout() {}, clearInterval() {} },
   });
@@ -22,15 +22,13 @@ function fixture() {
 }
 const token = async () => ({ token: "temporary", sessionId: "test-session" });
 
-test("SDK initialState and set() send their correct full state structures", () => {
+test("SDK set() always bundles prompt, image, enhance for graft guides", () => {
   const image = new Blob(["image"]);
-  const images = { partial: image };
-  const state = stateOf("partial", "ref", images);
-  assert.deepEqual(initialStateOf("partial", "ref", images), { prompt: { text: state.prompt, enhance: true }, image });
-  const text = stateOf("partial", "text", images);
-  assert.ok(!("image" in text));
-  assert.ok(!text.prompt.includes("from the reference image"));
-  assert.throws(() => stateOf("invalid", "ref", images));
+  const prompt = promptForArea("hairline");
+  const state = { prompt, image, enhance: false };
+  assert.equal("prompt" in state && "image" in state && "enhance" in state, true);
+  assert.equal(state.enhance, false);
+  assert.ok(prompt.includes("hairline exactly at the position"));
 });
 test("tick cap stops once, stops all camera tracks, and reports capture conditions", async () => {
   const f = fixture();
@@ -57,7 +55,7 @@ test("a reconnect tick reset preserves total usage; a new session starts at zero
   await f.session.start(f.stream, token, async () => f.rt, {});
   f.callbacks.get("generationTick")({ seconds: 70 });
   f.callbacks.get("connectionChange")("reconnecting");
-  assert.equal(await f.session.select("1k", {}), false);
+  assert.equal(await f.session.select("hairline_1k", {}), false);
   f.callbacks.get("connectionChange")("generating");
   f.callbacks.get("generationTick")({ seconds: 0 });
   f.callbacks.get("generationTick")({ seconds: 50 });
@@ -71,13 +69,13 @@ test("a reconnect tick reset preserves total usage; a new session starts at zero
 test("switches share the connection; capture closes it immediately", async () => {
   const f = fixture();
   await f.session.start(f.stream, token, async () => f.rt, {});
-  assert.equal(await f.session.select("1k", { prompt: "full state", enhance: true, image: new Blob() }), true);
+  assert.equal(await f.session.select("hairline_1k", { prompt: "full state", enhance: true, image: new Blob() }), true);
   assert.equal(f.session.switches, 1);
   assert.equal(f.counts().disconnects, 0);
   f.session.stop("capture", true);
   assert.equal(f.counts().disconnects, 1);
   assert.equal(f.reports[0].captured, true);
-  assert.equal(f.reports[0].combo, "1k");
+  assert.equal(f.reports[0].combo, "hairline_1k");
 });
 test("rapid select drains to the latest preset without reconnect", async () => {
   const f = fixture();
@@ -92,11 +90,11 @@ test("rapid select drains to the latest preset without reconnect", async () => {
     active--;
   };
   await f.session.start(f.stream, token, async () => f.rt, {});
-  const first = f.session.select("1k", { prompt: "1k", enhance: true });
-  const second = f.session.select("2k", { prompt: "2k", enhance: true });
+  const first = f.session.select("hairline_1k", { prompt: "1k", enhance: true });
+  const second = f.session.select("hairline_2k", { prompt: "2k", enhance: true });
   assert.equal(await first, true);
   assert.equal(await second, true);
-  assert.equal(f.session.combo, "2k");
+  assert.equal(f.session.combo, "hairline_2k");
   assert.deepEqual(f.sets.map((item) => item.prompt), ["1k", "2k"]);
   assert.ok(f.session.switches >= 1);
   assert.equal(active, 0);

@@ -808,6 +808,20 @@ export function createReferenceFlow({
     dispose() {
       clearUpload();
       setGlobalError("");
+      if (session && !session.stopped) session.stop("manual");
+      else stopCamera();
+      selfie.stop();
+      clearCountdown();
+      for (const id of ["ref-layer-idle", "ref-layer-ready", "ref-layer-capture", "ref-layer-generating"]) {
+        $(id).hidden = true;
+      }
+      $("ref-live-thumb").hidden = true;
+      $("ref-stage-banner").hidden = true;
+      $("ref-ready-bar").hidden = true;
+      $("ref-live-bar").hidden = true;
+      $("ref-bottom").hidden = true;
+      const lab = $("ref-lab-debug");
+      if (lab) lab.hidden = true;
     },
     stopLive(reason = "manual") {
       if (session && !session.stopped) session.stop(reason);

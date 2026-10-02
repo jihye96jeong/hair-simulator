@@ -11,8 +11,15 @@ import { mountBrowserVendor } from "./lib/browser-vendor.js";
 import { assetAvailability } from "./lib/assets.js";
 import { createHairVision } from "./lib/hair-vision.js";
 import { createHairEditor, hairEditorInactiveReasons } from "./lib/hair-editor.js";
+import {
+  createGraftInpaintAdapter,
+  graftInpaintInactiveReasons,
+  listGraftInpaintAdapters,
+  runGraftInpaint,
+} from "./lib/graft-inpaint.js";
 import { runPreviewContest } from "./lib/hair-judge.js";
 import { buildHairPrompt, describeHairKo, sanitizeHairSpec } from "./public/hairPrompt.js";
+import { GRAFT_LEVELS, GRAFT_AREAS } from "./public/graftRules.js";
 
 const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 
@@ -46,6 +53,7 @@ export async function createApp({
   logger = console,
   hairVision,
   hairEditor,
+  graftInpaint,
 } = {}) {
   const app = express();
   app.disable("x-powered-by");
@@ -53,6 +61,7 @@ export async function createApp({
   const quota = new DailyQuota({ ...config, now });
   const describeQuota = new DailyQuota({ ipLimit: config.describeIpLimit, totalLimit: config.describeTotalLimit, now });
   const previewQuota = new DailyQuota({ ipLimit: config.previewIpLimit, totalLimit: config.previewTotalLimit, now });
+  const graftQuota = new DailyQuota({ ipLimit: config.graftInpaintIpLimit, totalLimit: config.graftInpaintTotalLimit, now });
   const sessions = new Map();
   const client = decart || (config.decartKey ? createDecartClient({ apiKey: config.decartKey, logger: noopLogger }) : null);
   const vision = hairVision === undefined
@@ -64,6 +73,13 @@ export async function createApp({
   if (hairEditor === undefined && !editor) {
     const missing = hairEditorInactiveReasons({ provider: config.editProvider, apiKey: config.geminiKey });
     logger.warn?.(`hair-preview disabled: missing or invalid ${missing.join(", ")}`);
+  }
+  const defaultGraftInpaint = graftInpaint === undefined
+    ? createGraftInpaintAdapter({ apiKey: config.geminiKey, model: config.graftInpaintModel })
+    : graftInpaint;
+  if (graftInpaint === undefined && !defaultGraftInpaint) {
+    const missing = graftInpaintInactiveReasons({ apiKey: config.geminiKey });
+    logger.warn?.(`graft-inpaint disabled: missing or invalid ${missing.join(", ")}`);
   }
 
   app.use((_req, res, next) => {
@@ -81,6 +97,9 @@ export async function createApp({
       anchor: config.anchor,
       lab: config.lab,
       assets: await assetAvailability(),
+      graftEnhanceDefault: Boolean(config.graftEnhanceDefault),
+      graftInpaintModel: config.graftInpaintModel,
+      graftInpaintAdapters: listGraftInpaintAdapters(),
       privacy: {
         operator: config.operator,
         retention: config.retention,
@@ -182,6 +201,68 @@ export async function createApp({
       res.status(502).json({ error: "미리보기를 만들지 못했어요. 다시 시도해 주세요." });
     }
   });
+
+  app.post("/graft-inpaint", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!defaultGraftInpaint && graftInpaint === undefined) {
+      return res.status(503).json({ error: "모발 채우기를 만들 수 없어요." });
+    }
+    const modelChoice = resolveEditModel(req.body?.editModel || config.graftInpaintModel);
+    if (!modelChoice.ok) return res.status(400).json({ error: "허용되지 않은 편집 모델입니다." });
+    const adapter = modelChoice.model === config.graftInpaintModel && defaultGraftInpaint
+      ? defaultGraftInpaint
+      : createGraftInpaintAdapter({ apiKey: config.geminiKey, model: modelChoice.model });
+    if (!adapter) return res.status(503).json({ error: "모발 채우기를 만들 수 없어요." });
+
+    const person = parseDataImage(req.body?.person, PREVIEW_MAX_BYTES);
+    if (person.status) return res.status(person.status).json({ error: person.error });
+    const mask = parseDataImage(req.body?.mask, PREVIEW_MAX_BYTES);
+    if (mask.status) return res.status(mask.status).json({ error: mask.error });
+    if (mask.mediaType !== "image/png" && mask.mediaType !== "image/jpeg") {
+      return res.status(400).json({ error: "마스크는 PNG 또는 JPEG여야 합니다." });
+    }
+    const area = req.body?.area;
+    const grafts = Number(req.body?.grafts);
+    if (!GRAFT_AREAS.includes(area) || !GRAFT_LEVELS.includes(grafts)) {
+      return res.status(400).json({ error: "부위와 모량을 확인해 주세요." });
+    }
+
+    const reservation = graftQuota.reserve(req.ip);
+    if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
+    const started = Date.now();
+    try {
+      const result = await runGraftInpaint(adapter, {
+        person: person.buffer,
+        mask: mask.buffer,
+        personMediaType: person.mediaType,
+        maskMediaType: mask.mediaType,
+        area,
+        grafts,
+      });
+      logger.info?.("graft-inpaint", {
+        ok: true,
+        model: result.model,
+        ms: result.ms ?? (Date.now() - started),
+        estimatedCostUsd: result.estimatedCostUsd,
+        densityLabel: result.densityLabel,
+        area,
+        grafts,
+      });
+      res.json({
+        image: `data:${result.mediaType};base64,${result.buffer.toString("base64")}`,
+        model: result.model,
+        ms: result.ms ?? (Date.now() - started),
+        estimatedCostUsd: result.estimatedCostUsd,
+        densityLabel: result.densityLabel,
+      });
+    } catch {
+      reservation.release();
+      logger.info?.("graft-inpaint", { ok: false, ms: Date.now() - started, model: modelChoice.model });
+      logger.error("모수 인페인팅 실패");
+      res.status(502).json({ error: "모발 채우기 이미지를 만들지 못했어요. 다시 시도해 주세요." });
+    }
+  });
+
   app.post("/token", async (req, res) => {
     res.set("Cache-Control", "no-store");
     if (!client) return res.status(500).json({ error: "연결 준비가 되지 않았어요. 잠시 후 다시 시도해 주세요." });

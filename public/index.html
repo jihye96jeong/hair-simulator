@@ -39,6 +39,16 @@
       <video id="output" autoplay playsinline muted hidden></video>
       <img id="captured-image" class="result" alt="" hidden>
 
+      <!-- 모수: 촬영 가이드 -->
+      <div id="graft-capture-layer" class="ref-layer ref-capture-layer" hidden>
+        <video id="graft-local-video" autoplay playsinline muted></video>
+        <div id="graft-guide-front" class="selfie-guide" aria-hidden="true"></div>
+        <div id="graft-guide-crown" class="graft-crown-guide" aria-hidden="true" hidden></div>
+        <p id="graft-capture-hint" class="ref-overlay-text">정면을 봐주세요</p>
+        <p id="graft-countdown" class="ref-countdown" hidden>3</p>
+      </div>
+      <button type="button" id="graft-hold-original" class="graft-hold-original is-hidden">원래 모습</button>
+
       <!-- 레퍼런스: 대기 -->
       <div id="ref-layer-idle" class="ref-layer">
         <label class="ref-upload-hit">
@@ -82,7 +92,7 @@
       <span id="combo-label" class="chip top-left" hidden>헤어라인 · 부분</span>
       <span id="connection-state" class="chip top-right" hidden>연결 준비</span>
       <span id="expected-chip" class="chip bottom" hidden>예상 이미지</span>
-      <span id="remaining" class="chip top-left" hidden>120초 남음</span>
+      <span id="remaining" class="chip top-right" hidden>120초 남음</span>
       <span id="resolution" class="chip top-right" style="top:auto;bottom:10px;right:10px;left:auto" hidden></span>
     </div>
 
@@ -102,18 +112,20 @@
       </div>
     </div>
 
-    <!-- 모수: 같은 화면, 드롭 대신 조합 -->
+    <!-- 모수: 부위 · 모량 -->
     <div id="preset-bar" class="preset-bar" hidden>
       <div class="preset-row area-buttons" data-areas role="group" aria-label="부위"></div>
-      <div class="preset-row density combo-buttons" data-combos></div>
+      <div class="preset-row density combo-buttons" data-combos role="group" aria-label="모량"></div>
     </div>
 
     <div id="preset-actions" class="actions" hidden>
       <button type="button" id="connect">연결</button>
       <button type="button" id="disconnect" disabled>끊기</button>
+      <button type="button" id="graft-capture" disabled>캡처</button>
     </div>
 
-    <p id="status" role="status" hidden>부위를 고른 뒤 연결을 누르세요.</p>
+    <p id="graft-disclaimer" class="fine graft-disclaimer" hidden>참고용 시뮬레이션이며 실제 시술 결과와 다를 수 있습니다.</p>
+    <p id="status" role="status" hidden></p>
     <p id="billing-note" class="fine" hidden>연결을 누른 뒤부터 초당 $0.02입니다. 한 세션은 120초에서 끊깁니다.</p>
 
     <!-- 리드/랩/캡처 오버레이 (한 화면 흐름 유지) -->

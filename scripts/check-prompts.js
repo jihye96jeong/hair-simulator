@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { COMBOS, stateOf } from "../public/combos.js";
-for (const [key, combo] of Object.entries(COMBOS)) {
-  assert.ok(combo.prompt.length <= 750, `${key}: 750자 초과`);
-  assert.ok(!stateOf(key, "text", {}).prompt.includes("from the reference image"));
-  console.log(`${key}: ${combo.prompt.length}/750 통과`);
+import { GRAFT_AREAS, GRAFT_LEVELS, promptForArea } from "../public/graftRules.js";
+for (const area of GRAFT_AREAS) {
+  const prompt = promptForArea(area);
+  assert.ok(prompt.length <= 750, `${area}: 750자 초과`);
+  assert.ok(prompt.includes("Keep the face, eyes, eyebrows"));
+  console.log(`${area}: ${prompt.length}/750 통과`);
 }
+for (const grafts of GRAFT_LEVELS) assert.ok(grafts > 0);

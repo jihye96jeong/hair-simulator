@@ -24,6 +24,7 @@ export class RealtimeSession {
   }) {
     Object.assign(this, { mode, anchor, combo, experienceType, onState, onTick, onStop, onRemote, onError, report, now, timers, logger });
     this.stopped = false;
+    this.remoteStream = null;
     this.state = "connecting";
     this.billedSeconds = 0;
     this.lastTick = null;
@@ -50,7 +51,12 @@ export class RealtimeSession {
       this.clock = this.timers.setInterval(() => this.onTick(this.billedSeconds, this.wallSeconds()), 250);
       const rt = await connect(stream, {
         ...options,
-        onRemoteStream: (remote) => { if (!this.stopped) this.onRemote(remote); },
+        onRemoteStream: (remote) => {
+          if (!this.stopped) {
+            this.remoteStream = remote;
+            this.onRemote(remote);
+          }
+        },
         onConnectionChange: (state) => this.connectionChange(state),
       }, result.token);
       if (this.stopped) { rt.disconnect(); return; }
