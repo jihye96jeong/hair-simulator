@@ -11,15 +11,21 @@ import { mountBrowserVendor } from "./lib/browser-vendor.js";
 import { assetAvailability } from "./lib/assets.js";
 import { createHairVision } from "./lib/hair-vision.js";
 import { createHairEditor, hairEditorInactiveReasons } from "./lib/hair-editor.js";
+import { createBaselineEditor, baselineEditorInactiveReasons } from "./lib/baseline-editor.js";
 import {
   createGraftInpaintAdapter,
   graftInpaintInactiveReasons,
   listGraftInpaintAdapters,
   runGraftInpaint,
 } from "./lib/graft-inpaint.js";
+import {
+  createGraftFillAdapter,
+  graftFillInactiveReasons,
+  runGraftFill,
+} from "./lib/graft-fill.js";
 import { runPreviewContest } from "./lib/hair-judge.js";
 import { buildHairPrompt, describeHairKo, sanitizeHairSpec } from "./public/hairPrompt.js";
-import { GRAFT_LEVELS, GRAFT_AREAS } from "./public/graftRules.js";
+import { GRAFT_LEVELS, GRAFT_AREAS, ruleFor } from "./public/graftRules.js";
 
 const publicDir = fileURLToPath(new URL("./public/", import.meta.url));
 
@@ -53,7 +59,9 @@ export async function createApp({
   logger = console,
   hairVision,
   hairEditor,
+  baselineEditor,
   graftInpaint,
+  graftFill,
 } = {}) {
   const app = express();
   app.disable("x-powered-by");
@@ -61,7 +69,9 @@ export async function createApp({
   const quota = new DailyQuota({ ...config, now });
   const describeQuota = new DailyQuota({ ipLimit: config.describeIpLimit, totalLimit: config.describeTotalLimit, now });
   const previewQuota = new DailyQuota({ ipLimit: config.previewIpLimit, totalLimit: config.previewTotalLimit, now });
+  const baselineQuota = new DailyQuota({ ipLimit: config.baselineIpLimit, totalLimit: config.baselineTotalLimit, now });
   const graftQuota = new DailyQuota({ ipLimit: config.graftInpaintIpLimit, totalLimit: config.graftInpaintTotalLimit, now });
+  const graftFillQuota = new DailyQuota({ ipLimit: config.graftFillIpLimit, totalLimit: config.graftFillTotalLimit, now });
   /** sessionId:area:grafts:view → still payload (no durable disk). */
   const graftStillCache = new Map();
   const sessions = new Map();
@@ -76,12 +86,26 @@ export async function createApp({
     const missing = hairEditorInactiveReasons({ provider: config.editProvider, apiKey: config.geminiKey });
     logger.warn?.(`hair-preview disabled: missing or invalid ${missing.join(", ")}`);
   }
+  const baseline = baselineEditor === undefined
+    ? createBaselineEditor({ provider: config.editProvider, model: config.editModel, apiKey: config.geminiKey })
+    : baselineEditor;
+  if (baselineEditor === undefined && !baseline) {
+    const missing = baselineEditorInactiveReasons({ provider: config.editProvider, apiKey: config.geminiKey });
+    logger.warn?.(`baseline disabled: missing or invalid ${missing.join(", ")}`);
+  }
   const defaultGraftInpaint = graftInpaint === undefined
     ? createGraftInpaintAdapter({ apiKey: config.geminiKey, model: config.graftInpaintModel })
     : graftInpaint;
   if (graftInpaint === undefined && !defaultGraftInpaint) {
     const missing = graftInpaintInactiveReasons({ apiKey: config.geminiKey });
     logger.warn?.(`graft-inpaint disabled: missing or invalid ${missing.join(", ")}`);
+  }
+  const defaultGraftFill = graftFill === undefined
+    ? createGraftFillAdapter({ apiKey: config.geminiKey, model: config.graftInpaintModel })
+    : graftFill;
+  if (graftFill === undefined && !defaultGraftFill) {
+    const missing = graftFillInactiveReasons({ apiKey: config.geminiKey });
+    logger.warn?.(`graft-fill disabled: missing or invalid ${missing.join(", ")}`);
   }
 
   app.use((_req, res, next) => {
@@ -204,6 +228,58 @@ export async function createApp({
     }
   });
 
+  app.post("/baseline", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!baseline) return res.status(503).json({ error: "시술 전 이미지를 만들 수 없어요." });
+    const modelChoice = resolveEditModel(req.body?.editModel);
+    if (!modelChoice.ok) return res.status(400).json({ error: "허용되지 않은 편집 모델입니다." });
+    const editorForBaseline = modelChoice.model === config.editModel && baseline
+      ? baseline
+      : createBaselineEditor({ provider: config.editProvider, model: modelChoice.model, apiKey: config.geminiKey });
+    if (!editorForBaseline) return res.status(503).json({ error: "시술 전 이미지를 만들 수 없어요." });
+    const person = parseDataImage(req.body?.person, PREVIEW_MAX_BYTES);
+    if (person.status) return res.status(person.status).json({ error: person.error });
+    const maskParsed = req.body?.mask
+      ? parseDataImage(req.body.mask, PREVIEW_MAX_BYTES)
+      : null;
+    if (maskParsed?.status) return res.status(maskParsed.status).json({ error: maskParsed.error });
+    const pose = req.body?.pose === "crown" ? "crown" : "front";
+    const reservation = baselineQuota.reserve(req.ip);
+    if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
+    const started = Date.now();
+    try {
+      const result = await editorForBaseline.edit({
+        person: person.buffer,
+        mask: maskParsed?.buffer,
+        mediaType: person.mediaType || "image/jpeg",
+        maskMediaType: maskParsed?.mediaType || "image/png",
+        pose,
+        aspectRatio: "3:4",
+      });
+      logger.info?.("baseline", {
+        ok: true,
+        pose,
+        model: result.model || modelChoice.model,
+        ms: result.ms ?? (Date.now() - started),
+        estimatedCostUsd: result.estimatedCostUsd,
+        hasMask: Boolean(maskParsed?.buffer),
+      });
+      res.json({
+        image: `data:${result.mediaType};base64,${result.buffer.toString("base64")}`,
+        model: result.model || modelChoice.model,
+        ms: result.ms ?? (Date.now() - started),
+        estimatedCostUsd: result.estimatedCostUsd,
+        pose,
+        editModel: modelChoice.model,
+      });
+    } catch {
+      reservation.release();
+      logger.info?.("baseline", { ok: false, pose, ms: Date.now() - started });
+      logger.error("탈모 기준선 생성 실패");
+      res.status(502).json({ error: "시술 전 이미지를 만들지 못했어요" });
+    }
+  });
+
   app.post("/graft-inpaint", async (req, res) => {
     res.set("Cache-Control", "no-store");
     if (!defaultGraftInpaint && graftInpaint === undefined) {
@@ -294,6 +370,73 @@ export async function createApp({
     }
   });
 
+  app.post("/graft-fill", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!defaultGraftFill && graftFill === undefined) {
+      return res.status(503).json({ error: "모발 채우기를 만들 수 없어요." });
+    }
+    const modelChoice = resolveEditModel(req.body?.editModel || config.graftInpaintModel);
+    if (!modelChoice.ok) return res.status(400).json({ error: "허용되지 않은 편집 모델입니다." });
+    const adapter = modelChoice.model === config.graftInpaintModel && defaultGraftFill
+      ? defaultGraftFill
+      : createGraftFillAdapter({ apiKey: config.geminiKey, model: modelChoice.model });
+    if (!adapter) return res.status(503).json({ error: "모발 채우기를 만들 수 없어요." });
+
+    const person = parseDataImage(req.body?.person, PREVIEW_MAX_BYTES);
+    if (person.status) return res.status(person.status).json({ error: person.error });
+    const mask = parseDataImage(req.body?.mask, PREVIEW_MAX_BYTES);
+    if (mask.status) return res.status(mask.status).json({ error: mask.error });
+    if (mask.mediaType !== "image/png" && mask.mediaType !== "image/jpeg") {
+      return res.status(400).json({ error: "마스크는 PNG 또는 JPEG여야 합니다." });
+    }
+    const area = req.body?.area;
+    const grafts = Number(req.body?.grafts);
+    let density = Number(req.body?.density);
+    if (GRAFT_AREAS.includes(area) && GRAFT_LEVELS.includes(grafts)) {
+      density = ruleFor(area, grafts).density;
+    } else if (!(density > 0 && density <= 1)) {
+      return res.status(400).json({ error: "부위·모량 또는 밀도를 확인해 주세요." });
+    }
+
+    const reservation = graftFillQuota.reserve(req.ip);
+    if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
+    const started = Date.now();
+    try {
+      const result = await runGraftFill(adapter, {
+        person: person.buffer,
+        mask: mask.buffer,
+        personMediaType: person.mediaType,
+        maskMediaType: mask.mediaType,
+        density,
+      });
+      logger.info?.("graft-fill", {
+        ok: true,
+        model: result.model,
+        ms: result.ms ?? (Date.now() - started),
+        estimatedCostUsd: result.estimatedCostUsd,
+        densityLabel: result.densityLabel,
+        area: area || "",
+        grafts: Number.isFinite(grafts) ? grafts : "",
+      });
+      res.json({
+        image: `data:${result.mediaType};base64,${result.buffer.toString("base64")}`,
+        model: result.model,
+        ms: result.ms ?? (Date.now() - started),
+        estimatedCostUsd: result.estimatedCostUsd,
+        densityLabel: result.densityLabel,
+      });
+    } catch (error) {
+      reservation.release();
+      logger.info?.("graft-fill", { ok: false, ms: Date.now() - started, model: modelChoice.model });
+      if (error?.code === "fill-size-mismatch") {
+        logger.error("모수 채움 크기 불일치");
+        return res.status(502).json({ error: "모발 채우기 이미지를 만들지 못했어요. 다시 시도해 주세요." });
+      }
+      logger.error("모수 채움 실패");
+      res.status(502).json({ error: "모발 채우기 이미지를 만들지 못했어요. 다시 시도해 주세요." });
+    }
+  });
+
   app.get("/graft-cache/:sessionId", (req, res) => {
     res.set("Cache-Control", "no-store");
     const id = req.params.sessionId;
@@ -354,6 +497,9 @@ export async function createApp({
       const { record } = sessionFor(req);
       if (record.ended) return res.sendStatus(204);
       record.ended = true;
+      if (/insufficient[_\s-]?credits/i.test(String(req.body?.reason || ""))) {
+        logger.error("Decart 크레딧 부족");
+      }
       res.sendStatus(204);
     } catch (error) {
       if (error instanceof ValidationError) return res.status(400).json({ error: error.message });

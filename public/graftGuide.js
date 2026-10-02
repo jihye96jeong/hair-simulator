@@ -1,9 +1,20 @@
 import { ruleFor } from "./graftRules.js";
-import { clampFillSizeCm } from "./baselineLoss.js";
+import {
+  GUIDE_BOTTOM_BLUR_PX,
+  meanAlphaInMask,
+  mulberry32,
+  renderHairTextureLayer,
+  seedFromKey,
+} from "./hairTexture.js";
 
-/** Soft edge width in mm (병원 확인 전 임시값). */
+/** Soft edge width in mm (병원 확인 전 임시값). Range 2–4mm. */
 const FEATHER_MM = 3;
 const PROTECT_GAP_CM = 0.5;
+/**
+ * Hairline mask must span at least this fraction of temple-to-temple face width.
+ * 병원 확인 전 임시값.
+ */
+export const MASK_FACE_WIDTH_MIN_RATIO = 0.6;
 
 function hashBuffer(bytes) {
   let h = 2166136261;
@@ -33,7 +44,6 @@ function shiftedHairline(curve, depthPx) {
   return curve.map((p) => ({ x: p.x, y: p.y + depthPx }));
 }
 
-/** Soft lift of ends toward temples so the drop tapers at the sides. */
 function taperedLowerCurve(upper, depthPx, templeLeft, templeRight) {
   const lower = shiftedHairline(upper, depthPx);
   const leftX = templeLeft?.x ?? upper[0].x;
@@ -49,28 +59,21 @@ function taperedLowerCurve(upper, depthPx, templeLeft, templeRight) {
 }
 
 /**
- * Hard geometric fill region (0..1) before feathering.
- * When baselineGeometry is set, fill relative to the virtual-loss void.
+ * Hard geometric fill region (0..1) on a recession baseline measure.
+ * Density is applied by Gemini fill — mask geometry is solid (plus feather).
  */
-export function buildFillMask({ area, measure, sizeCm, rgba, hairMask, baselineGeometry = null }) {
+export function buildFillMask({ area, measure, sizeCm }) {
   const { width, height } = measure;
   const mask = new Float32Array(width * height);
-  const effectiveCm = baselineGeometry ? clampFillSizeCm(area, sizeCm) : sizeCm;
-  const px = effectiveCm * measure.pxPerCm;
+  const px = sizeCm * measure.pxPerCm;
   const protectY = measure.kind === "front"
     ? measure.browTopY - PROTECT_GAP_CM * measure.pxPerCm
     : height;
 
   if (area === "hairline") {
-    const upper = baselineGeometry?.virtualHairline || measure.hairlineCurve;
-    const maxDepth = baselineGeometry
-      ? Math.min(px, (baselineGeometry.recedeCm || effectiveCm) * measure.pxPerCm)
-      : px;
-    // At full void size, restore the original hairline (nearly complete recovery).
-    const lower = baselineGeometry?.originalHairline
-      && effectiveCm >= (baselineGeometry.recedeCm || 0) - 1e-6
-      ? baselineGeometry.originalHairline
-      : taperedLowerCurve(upper, maxDepth, measure.templeLeft, measure.templeRight);
+    const upper = measure.hairlineCurve;
+    if (!upper?.length) throw new Error("hairline-curve-missing");
+    const lower = taperedLowerCurve(upper, px, measure.templeLeft, measure.templeRight);
     const minX = Math.floor(Math.min(upper[0].x, lower[0].x));
     const maxX = Math.ceil(Math.max(upper[upper.length - 1].x, lower[lower.length - 1].x));
     for (let x = minX; x <= maxX; x++) {
@@ -109,8 +112,7 @@ export function buildFillMask({ area, measure, sizeCm, rgba, hairMask, baselineG
       }
     }
   } else if (area === "crown") {
-    const center = baselineGeometry?.crownCenter || measure.crownCenter;
-    const { x: cx, y: cy } = center;
+    const { x: cx, y: cy } = measure.crownCenter;
     const r = px;
     const r2 = r * r;
     const minX = Math.max(0, Math.floor(cx - r - 1));
@@ -122,19 +124,7 @@ export function buildFillMask({ area, measure, sizeCm, rgba, hairMask, baselineG
         const dx = x - cx;
         const dy = y - cy;
         if (dx * dx + dy * dy > r2) continue;
-        const i = y * width + x;
-        if (baselineGeometry) {
-          // Fill voided crown disk; density applied via prompt / sparse keep.
-          mask[i] = 1;
-          continue;
-        }
-        if (!hairMask[i]) continue;
-        const o = i * 4;
-        const bright = rgba
-          && rgba[o] > 120 && rgba[o + 1] > 100 && rgba[o + 2] > 90
-          && Math.max(rgba[o], rgba[o + 1], rgba[o + 2]) - Math.min(rgba[o], rgba[o + 1], rgba[o + 2]) < 50;
-        if (!bright && (x + y) % 2 !== 0) continue;
-        mask[i] = 1;
+        mask[y * width + x] = 1;
       }
     }
   } else {
@@ -143,7 +133,6 @@ export function buildFillMask({ area, measure, sizeCm, rgba, hairMask, baselineG
   return mask;
 }
 
-/** Separable box blur for soft mask edges (white=fill). */
 export function featherMask(mask, width, height, radiusPx) {
   const r = Math.max(1, Math.round(radiusPx));
   const tmp = new Float32Array(width * height);
@@ -187,6 +176,78 @@ function protectBelowBrow(mask, width, height, browTopY) {
   return mask;
 }
 
+export function maskBounds(fillMask, width, height, threshold = 0.15) {
+  let minX = width;
+  let maxX = -1;
+  let minY = height;
+  let maxY = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (fillMask[y * width + x] < threshold) continue;
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  if (maxX < minX) return { minX: 0, maxX: 0, minY: 0, maxY: 0, widthPx: 0, heightPx: 0 };
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    widthPx: maxX - minX + 1,
+    heightPx: maxY - minY + 1,
+  };
+}
+
+export function faceWidthPx(measure) {
+  const left = measure?.templeLeft?.x;
+  const right = measure?.templeRight?.x;
+  if (!(Number.isFinite(left) && Number.isFinite(right))) return 0;
+  return Math.abs(right - left);
+}
+
+/**
+ * Hairline mask must follow the full hairline band across most of the face width.
+ */
+export function assertHairlineMaskWidth({
+  fillMask,
+  measure,
+  minRatio = MASK_FACE_WIDTH_MIN_RATIO,
+} = {}) {
+  const { width, height } = measure;
+  const faceW = faceWidthPx(measure);
+  const bounds = maskBounds(fillMask, width, height);
+  if (!(faceW > 0) || !(bounds.widthPx >= faceW * minRatio)) {
+    const error = new Error("얼굴이 정면으로 보이게 다시 촬영해주세요");
+    error.code = "mask-width-fail";
+    error.faceWidthPx = faceW;
+    error.maskWidthPx = bounds.widthPx;
+    throw error;
+  }
+  return bounds;
+}
+
+function countFilled(fillMask, threshold = 0.15) {
+  let n = 0;
+  for (let i = 0; i < fillMask.length; i++) if (fillMask[i] >= threshold) n += 1;
+  return n;
+}
+
+function maskRgba(fillMask, width, height) {
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < fillMask.length; i++) {
+    const v = Math.round(Math.min(1, Math.max(0, fillMask[i])) * 255);
+    const o = i * 4;
+    rgba[o] = v;
+    rgba[o + 1] = v;
+    rgba[o + 2] = v;
+    rgba[o + 3] = 255;
+  }
+  return rgba;
+}
+
 function canvasFromRgba(rgba, width, height) {
   let canvas;
   if (typeof OffscreenCanvas !== "undefined") {
@@ -205,13 +266,28 @@ function canvasFromRgba(rgba, width, height) {
     };
   }
   const ctx = canvas.getContext("2d");
-  ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
+  ctx.putImageData(new ImageData(rgba instanceof Uint8ClampedArray ? rgba : new Uint8ClampedArray(rgba), width, height), 0, 0);
   return canvas;
 }
 
 async function canvasToBlob(canvas, type, quality) {
   if (canvas.__rgba) {
-    return new Blob([canvas.__rgba], { type: type || "application/octet-stream" });
+    try {
+      const sharp = (await import("sharp")).default;
+      const { width, height } = canvas;
+      if (type === "image/png") {
+        return new Blob([
+          await sharp(Buffer.from(canvas.__rgba), { raw: { width, height, channels: 4 } }).png().toBuffer(),
+        ], { type: "image/png" });
+      }
+      return new Blob([
+        await sharp(Buffer.from(canvas.__rgba), { raw: { width, height, channels: 4 } })
+          .jpeg({ quality: Math.round((quality || 0.9) * 100) })
+          .toBuffer(),
+      ], { type: "image/jpeg" });
+    } catch {
+      return new Blob([canvas.__rgba], { type: type || "application/octet-stream" });
+    }
   }
   if (canvas.convertToBlob) return canvas.convertToBlob({ type, quality });
   return new Promise((resolve, reject) => {
@@ -219,148 +295,127 @@ async function canvasToBlob(canvas, type, quality) {
   });
 }
 
-function maskToRgba(fillMask) {
-  const rgba = new Uint8ClampedArray(fillMask.length * 4);
-  for (let i = 0; i < fillMask.length; i++) {
-    const v = Math.round(Math.min(1, Math.max(0, fillMask[i])) * 255);
-    const o = i * 4;
-    rgba[o] = v;
-    rgba[o + 1] = v;
-    rgba[o + 2] = v;
-    rgba[o + 3] = 255;
-  }
-  return rgba;
-}
-
-function countFilled(fillMask, threshold = 0.15) {
-  let n = 0;
-  for (let i = 0; i < fillMask.length; i++) if (fillMask[i] >= threshold) n += 1;
-  return n;
-}
-
 /**
- * Target geometric region minus already-dense hair.
- * In baseline mode prefer filling the void (baselineMask) even if residual hair remains.
+ * Build a white FILL MASK PNG only (no painted hair / no dot noise).
  */
-export function subtractExistingHair(targetMask, hairMask, rgba, width, height, {
-  keepSparse = true,
-  baselineMask = null,
-} = {}) {
-  const fill = new Float32Array(width * height);
-  const boost = new Float32Array(width * height);
-  for (let i = 0; i < targetMask.length; i++) {
-    if (targetMask[i] <= 0) continue;
-    if (baselineMask && baselineMask[i] > 0.2) {
-      fill[i] = targetMask[i];
-      continue;
-    }
-    if (!hairMask[i]) {
-      fill[i] = targetMask[i];
-      continue;
-    }
-    const o = i * 4;
-    const bright = rgba
-      && rgba[o] > 120 && rgba[o + 1] > 100 && rgba[o + 2] > 90
-      && Math.max(rgba[o], rgba[o + 1], rgba[o + 2]) - Math.min(rgba[o], rgba[o + 1], rgba[o + 2]) < 50;
-    if (bright || keepSparse) {
-      boost[i] = targetMask[i] * (bright ? 1 : 0.55);
-      fill[i] = boost[i];
-    }
-  }
-  return { fill, boost };
-}
-
-/**
- * Build a feathered fill mask only (white = inpaint).
- * When baselineLoss is provided, guide input is the virtual-loss frame.
- */
-export async function buildGraftMask({
-  imageData,
-  hairMask,
-  measure,
-  area,
-  grafts,
-  baselineLoss = null,
-}) {
+export async function buildGraftMask({ measure, area, grafts }) {
   const rule = ruleFor(area, grafts);
   const { width, height } = measure;
-  const sourceImage = baselineLoss?.imageData || imageData;
-  const sourceHair = baselineLoss?.hairMask || hairMask;
-  if (sourceImage.width !== width || sourceImage.height !== height) {
-    throw new Error("frame-size-mismatch");
-  }
-  const sizeCm = baselineLoss ? clampFillSizeCm(area, rule.sizeCm) : rule.sizeCm;
-  const target = buildFillMask({
-    area,
-    measure,
-    sizeCm: rule.sizeCm,
-    rgba: sourceImage.data,
-    hairMask: sourceHair,
-    baselineGeometry: baselineLoss?.geometry || null,
-  });
-  const { fill: rawFill, boost } = subtractExistingHair(
-    target,
-    sourceHair,
-    sourceImage.data,
-    width,
-    height,
-    { baselineMask: baselineLoss?.baselineMask || null },
-  );
+  const hard = buildFillMask({ area, measure, sizeCm: rule.sizeCm });
   const radiusPx = Math.max(1, FEATHER_MM * 0.1 * measure.pxPerCm);
-  let soft = featherMask(rawFill, width, height, radiusPx);
+  let soft = featherMask(hard, width, height, radiusPx);
+  // Extra bottom soft-edge so strands thin out toward the hairline (10–15px).
+  soft = featherMask(soft, width, height, GUIDE_BOTTOM_BLUR_PX);
   if (measure.kind === "front") {
     soft = protectBelowBrow(soft, width, height, measure.browTopY);
   }
-  const rgba = maskToRgba(soft);
-  const maskCanvas = canvasFromRgba(rgba, width, height);
-  const mask = await canvasToBlob(maskCanvas, "image/png");
-  const filledPixels = countFilled(soft);
-  const voidPixels = baselineLoss
-    ? countFilled(baselineLoss.baselineMask, 0.9)
-    : 0;
-  let coveredVoid = 0;
-  if (baselineLoss) {
-    for (let i = 0; i < soft.length; i++) {
-      if (baselineLoss.baselineMask[i] >= 0.9 && soft[i] >= 0.15) coveredVoid += 1;
-    }
+  let bounds = maskBounds(soft, width, height);
+  if (area === "hairline") {
+    bounds = assertHairlineMaskWidth({ fillMask: soft, measure });
   }
+  const rgba = maskRgba(soft, width, height);
+  const canvas = canvasFromRgba(rgba, width, height);
+  const mask = await canvasToBlob(canvas, "image/png");
   return {
     mask,
     fillMask: soft,
-    boostMask: boost,
-    targetMask: target,
     rgba,
-    personImageData: sourceImage,
-    baselineLoss,
     stats: {
       area,
       grafts,
-      sizeCm,
+      sizeCm: rule.sizeCm,
       density: rule.density,
       pxPerCm: measure.pxPerCm,
-      filledPixels,
-      boostPixels: countFilled(boost, 0.1),
-      voidPixels,
-      filledCm2: filledPixels / (measure.pxPerCm * measure.pxPerCm),
-      voidCm2: voidPixels / (measure.pxPerCm * measure.pxPerCm),
-      fillRatioOfVoid: voidPixels > 0 ? coveredVoid / voidPixels : null,
+      filledPixels: countFilled(soft),
+      faceWidthPx: faceWidthPx(measure),
+      maskWidthPx: bounds.widthPx,
       hash: hashBuffer(rgba),
       featherPx: radiusPx,
-      baseline: Boolean(baselineLoss),
+      bottomBlurPx: GUIDE_BOTTOM_BLUR_PX,
     },
   };
 }
 
-/** @deprecated Use buildGraftMask. Kept so older imports keep working during transition. */
-export async function buildGraftGuide(input) {
-  const result = await buildGraftMask(input);
+/**
+ * Composite deterministic hair texture into the baseline inside the fill mask.
+ * Density maps to globalAlpha (0.6 / 0.8 / 0.95).
+ */
+export async function buildPrefillGuide({
+  imageData,
+  measure,
+  area,
+  grafts,
+  fillMask: existingMask,
+}) {
+  const rule = ruleFor(area, grafts);
+  const { width, height, data: src } = imageData;
+  let fillMask = existingMask;
+  if (!fillMask) {
+    const built = await buildGraftMask({ measure, area, grafts });
+    fillMask = built.fillMask;
+  }
+  const seed = seedFromKey(`${area}:${grafts}:${width}x${height}:${Math.round(measure.browTopY || 0)}`);
+  const texture = renderHairTextureLayer({
+    width,
+    height,
+    fillMask,
+    measure,
+    area,
+    rgbaSource: src,
+    seed,
+    density: rule.density,
+  });
+  const out = new Uint8ClampedArray(src);
+  for (let i = 0; i < fillMask.length; i++) {
+    const o = i * 4;
+    const a = (texture[o + 3] / 255) * Math.min(1, fillMask[i]);
+    if (a <= 0.01) continue;
+    out[o] = Math.round(out[o] * (1 - a) + texture[o] * a);
+    out[o + 1] = Math.round(out[o + 1] * (1 - a) + texture[o + 1] * a);
+    out[o + 2] = Math.round(out[o + 2] * (1 - a) + texture[o + 2] * a);
+  }
+  if (measure.kind === "front" && Number.isFinite(measure.browTopY)) {
+    for (let y = Math.floor(measure.browTopY); y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const o = (y * width + x) * 4;
+        out[o] = src[o];
+        out[o + 1] = src[o + 1];
+        out[o + 2] = src[o + 2];
+        out[o + 3] = src[o + 3];
+      }
+    }
+  }
+  const canvas = canvasFromRgba(out, width, height);
+  const prefillGuide = await canvasToBlob(canvas, "image/jpeg", 0.9);
   return {
-    ...result,
-    guide: result.mask,
+    prefillGuide,
+    fillMask,
+    textureRgba: texture,
+    rgba: out,
+    stats: {
+      area,
+      grafts,
+      density: rule.density,
+      seed,
+      meanAlpha: meanAlphaInMask(texture, fillMask),
+      hash: hashBuffer(out),
+    },
   };
 }
 
-/** Mask must be fully black (0) at/below browTopY. */
+/** @deprecated Alias — callers should use buildGraftMask; returns mask as `guide` for older tests. */
+export async function buildGraftGuide(input) {
+  const result = await buildGraftMask(input);
+  return {
+    guide: result.mask,
+    guidedRgba: result.rgba,
+    fillMask: result.fillMask,
+    mask: result.mask,
+    rgba: result.rgba,
+    stats: result.stats,
+  };
+}
+
 export function assertProtectedRegionUnmasked(fillMask, width, height, browTopY) {
   const from = Math.floor(browTopY);
   for (let y = Math.max(0, from); y < height; y++) {
@@ -371,18 +426,4 @@ export function assertProtectedRegionUnmasked(fillMask, width, height, browTopY)
   return true;
 }
 
-/** Pixel-equal check for protected region between original and guided RGBA. */
-export function assertProtectedRegionUnchanged(originalRgba, guidedRgba, width, height, browTopY) {
-  const from = Math.floor(browTopY);
-  for (let y = Math.max(0, from); y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const o = (y * width + x) * 4;
-      if (
-        originalRgba[o] !== guidedRgba[o]
-        || originalRgba[o + 1] !== guidedRgba[o + 1]
-        || originalRgba[o + 2] !== guidedRgba[o + 2]
-      ) return false;
-    }
-  }
-  return true;
-}
+export { meanAlphaInMask, mulberry32, seedFromKey };

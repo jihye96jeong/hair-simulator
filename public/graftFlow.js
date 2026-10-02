@@ -8,19 +8,53 @@ import {
   promptForArea,
   ruleFor,
 } from "./graftRules.js";
-import { measureFrame, measureWithStabilization } from "./faceGeometry.js";
-import { buildGraftMask } from "./graftGuide.js";
-import { buildBaselineLoss } from "./baselineLoss.js";
-import {
-  SHOT_ORDER,
-  SHOT_META,
-  evaluateShotQuality,
-  livePoseFromAngles,
-} from "./graftPose.js";
-import { analyzeHairFromShots, prefetchOrder } from "./graftAnalyze.js";
-import { createDelayedStream, estimateStreamLagMs } from "./graftDelay.js";
+import { captureGraftStill, streamTrackStates } from "./graftCapture.js";
+import { buildGraftMask, buildPrefillGuide } from "./graftGuide.js";
+import { prefillBaseline } from "./baselinePrefill.js";
 import { RealtimeSession } from "./session.js";
 import { openFrontCamera, stopMediaStream } from "./camera.js";
+import {
+  assertBaselineForeheadGain,
+  blockMediaPipe,
+  closeMediaPipe,
+  foreheadExposeCm,
+  unblockMediaPipe,
+} from "./faceGeometry.js";
+import { normalizeLucyJpeg } from "./lucyImage.js";
+
+function labSdkLogger(sdk) {
+  const base = typeof sdk.createConsoleLogger === "function"
+    ? sdk.createConsoleLogger("info")
+    : {
+      debug: (message, data) => console.debug(message, data),
+      info: (message, data) => console.info(message, data),
+      warn: (message, data) => console.warn(message, data),
+      error: (message, data) => console.error(message, data),
+    };
+  const scrubValue = (value) => {
+    if (typeof value !== "string") return value;
+    return value
+      .replace(/api_key=[^&\s"']+/gi, "api_key=[redacted]")
+      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]")
+      .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[token]");
+  };
+  const scrubData = (data) => {
+    if (!data || typeof data !== "object") return data;
+    const out = Array.isArray(data) ? [...data] : { ...data };
+    for (const key of Object.keys(out)) {
+      if (/token|api[_-]?key|authorization|secret/i.test(key)) out[key] = "[redacted]";
+      else if (typeof out[key] === "string") out[key] = scrubValue(out[key]);
+      else if (out[key] && typeof out[key] === "object") out[key] = scrubData(out[key]);
+    }
+    return out;
+  };
+  return {
+    debug: (message, data) => base.debug(scrubValue(message), data == null ? data : scrubData(data)),
+    info: (message, data) => base.info(scrubValue(message), data == null ? data : scrubData(data)),
+    warn: (message, data) => base.warn(scrubValue(message), data == null ? data : scrubData(data)),
+    error: (message, data) => base.error(scrubValue(message), data == null ? data : scrubData(data)),
+  };
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -42,33 +76,25 @@ function dataUrlToBlob(dataUrl) {
   return new Blob([bytes], { type: match[1] });
 }
 
-function meanBrightness(imageData) {
-  const d = imageData.data;
-  let s = 0;
-  let n = 0;
-  for (let i = 0; i < d.length; i += 16) {
-    s += d[i] + d[i + 1] + d[i + 2];
-    n += 3;
-  }
-  return n ? s / n / 255 : 0;
-}
-
-async function rgbaToJpegBlob(imageData, quality = 0.92) {
-  if (typeof document === "undefined") {
-    return new Blob([imageData.data], { type: "application/octet-stream" });
-  }
-  const canvas = document.createElement("canvas");
-  canvas.width = imageData.width;
-  canvas.height = imageData.height;
-  canvas.getContext("2d").putImageData(
-    imageData instanceof ImageData
-      ? imageData
-      : new ImageData(imageData.data, imageData.width, imageData.height),
-    0,
-    0,
-  );
+async function canvasToJpeg(canvas, quality = 0.92) {
   return new Promise((resolve, reject) => {
     canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("frame-encode"))), "image/jpeg", quality);
+  });
+}
+
+function imageFromBlob(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("image-load"));
+    };
+    img.src = url;
   });
 }
 
@@ -79,39 +105,51 @@ export function createGraftFlow({
   getAnchor = () => "on",
   getEnhance = () => false,
   getEditModel = () => "",
-  getPrefetchMode = () => "preferred",
-  getDelaySync = () => true,
-  getBaselineLoss = () => false,
+  getTestMode = () => false,
+  getBaselineMode = () => "refined",
+  getFillMode = () => "refined",
   isLab = false,
 }) {
   let area = "hairline";
   let grafts = 2000;
-  let showBaseline = false;
   let session = null;
   let camera = null;
   let cameraEpoch = 0;
   let connecting = false;
   let switching = false;
   let screen = "idle";
-  let shotIndex = 0;
-  let retakeDir = null;
-  let shots = {};
-  let analysis = null;
-  let stillCache = new Map();
-  let baselineCache = new Map();
-  let stripCache = new Map();
-  let graftSessionId = null;
-  let prefetchAbort = null;
-  let holdOriginal = false;
-  let delayed = null;
-  let poseTimer = null;
-  let liveView = "front";
-  let labDebug = null;
-  let outputHome = null;
+  let holdBaseline = false;
+  let selectionTouched = false;
+  let captureBlob = null;
+  let baselineFront = null; // { blob, meta, bundle }
+  let baselineCrown = null;
+  let guideCache = new Map(); // mask entries
+  let fillCache = new Map(); // comboKey → { status, blob, meta, maskBlob, stats, error, prefillBlob }
+  let captureExposeCm = null;
+  let captureMeasure = null;
+  let baselineExposeCm = null;
+  let baldMaskBlob = null;
+  let prefillBaselineBlob = null;
+  let labTimings = { prefillMs: null, refineMs: null, fills: {} };
   let tokenPayload = null;
+  let labDebug = null;
+  let countdownTimer = null;
+  let pendingCapture = null; // "front" | "crown"
+  let lastBaselineError = null;
+  let lucyBaselineBlob = null; // normalized JPEG for Lucy only
 
-  function baselineOn() {
-    return Boolean(isLab && getBaselineLoss());
+  function testMode() {
+    return Boolean(isLab && getTestMode());
+  }
+
+  function baselineMode() {
+    const m = getBaselineMode?.() || "refined";
+    return m === "prefill" ? "prefill" : "refined";
+  }
+
+  function fillMode() {
+    const m = getFillMode?.() || "refined";
+    return m === "prefill" ? "prefill" : "refined";
   }
 
   function setError(message) {
@@ -122,88 +160,53 @@ export function createGraftFlow({
     return Boolean(getEnhance());
   }
 
+  function activeBaseline() {
+    return area === "crown" && baselineCrown ? baselineCrown : baselineFront;
+  }
+
   function showIdleStage() {
     $("stage-label").hidden = false;
-    $("stage-label").textContent = "촬영 시작을 눌러 정면·왼쪽·오른쪽·정수리 4장을 찍으세요";
+    $("stage-label").textContent = "촬영 시작을 눌러 정면을 찍으세요";
     $("output").hidden = true;
     $("combo-label").hidden = true;
     $("remaining").hidden = true;
-    $("graft-hold-original")?.classList.add("is-hidden");
+    $("graft-hold-baseline")?.classList.add("is-hidden");
     $("graft-capture-layer").hidden = true;
-    $("graft-split").hidden = true;
-    $("stage").classList.remove("graft-split-on");
-    restoreOutputHome();
+    $("graft-baseline-banner")?.setAttribute("hidden", "");
+    clearCountdown();
   }
 
-  function restoreOutputHome() {
-    if (outputHome && $("output")?.parentElement !== outputHome) {
-      outputHome.appendChild($("output"));
+  function clearCountdown() {
+    if (countdownTimer) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
     }
+    if ($("graft-countdown")) $("graft-countdown").hidden = true;
   }
 
-  function mountOutputInSplit() {
-    const pane = document.querySelector(".graft-pane-sim");
-    const out = $("output");
-    if (!pane || !out) return;
-    if (!outputHome) outputHome = out.parentElement;
-    pane.appendChild(out);
-    out.hidden = false;
-  }
-
-  function setCaptureGuide(direction) {
-    const meta = SHOT_META[direction];
-    $("graft-capture-hint").textContent = meta.hint;
-    $("graft-guide-front").hidden = direction !== "front";
-    $("graft-guide-left").hidden = direction !== "left";
-    $("graft-guide-right").hidden = direction !== "right";
-    $("graft-guide-crown").hidden = direction !== "crown";
-  }
-
-  function renderThumbs() {
-    const el = $("graft-thumbs");
+  function updateChip() {
+    const el = $("combo-label");
     if (!el) return;
-    el.innerHTML = "";
-    for (const dir of SHOT_ORDER) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "graft-thumb";
-      btn.dataset.shot = dir;
-      btn.setAttribute("aria-label", `${SHOT_META[dir].label} 다시 찍기`);
-      if (shots[dir]?.thumbUrl) {
-        const img = document.createElement("img");
-        img.src = shots[dir].thumbUrl;
-        img.alt = SHOT_META[dir].label;
-        btn.append(img);
-        if (shots[dir].quality && !shots[dir].quality.ok) btn.classList.add("warn");
-      } else {
-        btn.textContent = SHOT_META[dir].label;
-        btn.classList.add("empty");
-      }
-      if ((retakeDir || SHOT_ORDER[shotIndex]) === dir && screen === "capture") btn.classList.add("active");
-      btn.addEventListener("click", () => {
-        if (screen !== "capture") return;
-        retakeDir = dir;
-        shotIndex = SHOT_ORDER.indexOf(dir);
-        void enterCaptureStep();
-      });
-      el.append(btn);
+    if (screen !== "live") {
+      el.hidden = true;
+      return;
     }
-    $("graft-results").disabled = !SHOT_ORDER.every((d) => shots[d]) || connecting;
-  }
-
-  function updateSimLabel() {
-    const el = $("graft-sim-label");
-    if (!el) return;
-    let text;
-    if (holdOriginal) text = "현재";
-    else if (showBaseline) text = "기준선(탈모 상태)";
-    else {
-      const rule = ruleFor(area, grafts);
-      text = chipLabel(area, grafts, rule.sizeCm);
+    el.hidden = false;
+    if (holdBaseline || (!selectionTouched && session?.combo === "baseline")) {
+      el.textContent = "시술 전";
+      return;
     }
-    el.textContent = text;
-    $("combo-label").hidden = screen !== "live";
-    $("combo-label").textContent = text;
+    const fill = fillCache.get(comboKeyFor(area, grafts));
+    if (!fill || fill.status === "pending") {
+      el.textContent = "준비 중";
+      return;
+    }
+    if (fill.status === "error") {
+      el.textContent = "채움 실패";
+      return;
+    }
+    const rule = ruleFor(area, grafts);
+    el.textContent = chipLabel(area, grafts, rule.sizeCm);
   }
 
   function updateButtons() {
@@ -211,92 +214,71 @@ export function createGraftFlow({
       const value = btn.getAttribute("data-graft-area");
       btn.setAttribute("aria-pressed", value === area ? "true" : "false");
       btn.classList.toggle("selected", value === area);
-      const sufficient = !baselineOn() && analysis?.needs && !analysis.needs[value];
-      btn.classList.toggle("sufficient", Boolean(sufficient));
       const small = btn.querySelector("small");
       const hints = { mline: "이마 모서리", hairline: "이마선 전체", crown: "고개 숙여 확인" };
-      if (small) {
-        if (sufficient) small.textContent = "현재 상태로 충분";
-        else if (screen === "live" && !stillCache.has(cacheKey(value, grafts, value === "crown" ? "crown" : "front"))) {
-          small.textContent = "준비 중";
-        } else small.textContent = hints[value];
-      }
-      const ready = stillCache.has(cacheKey(value, grafts, value === "crown" ? "crown" : "front"))
-        || (showBaseline && baselineCache.has(value));
-      btn.disabled = connecting || switching || (screen === "live" && !ready && !sufficient && !showBaseline);
+      if (small) small.textContent = hints[value];
+      btn.disabled = connecting || switching || screen !== "live";
     }
     for (const btn of document.querySelectorAll("[data-graft-level]")) {
       const value = Number(btn.getAttribute("data-graft-level"));
-      btn.setAttribute("aria-pressed", !showBaseline && value === grafts ? "true" : "false");
-      btn.classList.toggle("selected", !showBaseline && value === grafts);
-      const ready = stillCache.has(cacheKey(area, value, area === "crown" ? "crown" : "front"));
-      const sufficient = !baselineOn() && analysis?.needs && !analysis.needs[area];
-      btn.disabled = connecting || switching || (screen === "live" && !ready && !sufficient);
-    }
-    const baselineBtn = $("graft-baseline-btn");
-    if (baselineBtn) {
-      baselineBtn.hidden = !isLab || !baselineOn();
-      baselineBtn.setAttribute("aria-pressed", showBaseline ? "true" : "false");
-      baselineBtn.classList.toggle("selected", showBaseline);
-      baselineBtn.disabled = connecting || switching || (screen === "live" && !baselineCache.has(area));
+      btn.setAttribute("aria-pressed", value === grafts ? "true" : "false");
+      btn.classList.toggle("selected", value === grafts);
+      btn.disabled = connecting || switching || screen !== "live";
     }
     const live = screen === "live" && session && !session.stopped;
-    $("connect").disabled = connecting || live || screen === "capture" || screen === "prefetch";
+    $("connect").disabled = connecting || live || screen === "capture";
     $("disconnect").disabled = screen === "idle" && !connecting;
-    if ($("graft-shutter")) $("graft-shutter").disabled = screen !== "capture" || connecting;
-    $("preset-bar").hidden = !(isActive() && (screen === "live" || screen === "prefetch"));
-    $("graft-shot-bar").hidden = !(isActive() && screen === "capture");
-    if ($("graft-original-btn")) $("graft-original-btn").hidden = !live;
+    $("preset-bar").hidden = !(isActive() && screen === "live");
     $("product-actions").hidden = !(isActive() && live);
     const video = $("output");
-    const frameReady = live && video && video.readyState >= 2 && video.videoWidth > 0;
+    const frameReady = live && video && video.srcObject
+      && (video.readyState >= 2 || video.videoWidth > 0);
     for (const id of ["save-result", "referral", "lab-capture"]) {
       const el = $(id);
       if (el) el.disabled = !frameReady || connecting || switching;
     }
     $("lab-actions").hidden = !(isLab && isActive() && live);
-    updateSimLabel();
-  }
-
-  function cacheKey(a, g, view) {
-    return `${comboKeyFor(a, g)}|${view}${baselineOn() ? "|bl" : ""}`;
+    if ($("graft-hold-baseline")) {
+      $("graft-hold-baseline").classList.toggle("is-hidden", !live);
+    }
+    updateChip();
   }
 
   function stopCamera() {
     cameraEpoch += 1;
     stopMediaStream(camera);
     camera = null;
-    delayed?.stop();
-    delayed = null;
-    if (poseTimer) {
-      clearInterval(poseTimer);
-      poseTimer = null;
-    }
+    clearCountdown();
   }
 
   function resetAll() {
-    prefetchAbort?.abort();
-    prefetchAbort = null;
     if (session && !session.stopped) session.stop("manual");
     session = null;
     connecting = false;
     switching = false;
     stopCamera();
     $("output").srcObject = null;
-    shots = {};
-    analysis = null;
-    stillCache = new Map();
-    baselineCache = new Map();
-    stripCache = new Map();
-    graftSessionId = null;
+    captureBlob = null;
+    baselineFront = null;
+    baselineCrown = null;
+    lucyBaselineBlob = null;
+    guideCache = new Map();
+    fillCache = new Map();
+    captureExposeCm = null;
+    captureMeasure = null;
+    baselineExposeCm = null;
+    baldMaskBlob = null;
+    prefillBaselineBlob = null;
+    labTimings = { prefillMs: null, refineMs: null, fills: {} };
     tokenPayload = null;
-    shotIndex = 0;
-    retakeDir = null;
-    showBaseline = false;
+    pendingCapture = null;
+    lastBaselineError = null;
+    holdBaseline = false;
+    selectionTouched = false;
     screen = "idle";
     showIdleStage();
-    renderThumbs();
     updateButtons();
+    updateLab();
   }
 
   async function ensureCamera() {
@@ -307,322 +289,313 @@ export function createGraftFlow({
     return camera;
   }
 
-  async function enterCaptureStep() {
-    screen = "capture";
-    const dir = retakeDir || SHOT_ORDER[shotIndex];
-    setCaptureGuide(dir);
-    $("graft-capture-layer").hidden = false;
-    $("graft-split").hidden = true;
-    $("stage-label").hidden = true;
-    $("graft-capture-warn").hidden = true;
+  async function runCountdown(seconds = 3) {
+    const ms = typeof window.__testGraftCountdownMs === "number" ? window.__testGraftCountdownMs : 1000;
+    const el = $("graft-countdown");
+    el.hidden = false;
+    for (let n = seconds; n >= 1; n--) {
+      el.textContent = String(n);
+      await new Promise((r) => {
+        countdownTimer = setTimeout(r, ms);
+      });
+      countdownTimer = null;
+    }
+    el.hidden = true;
+  }
+
+  async function captureFromVideo({ pose = "front" } = {}) {
+    unblockMediaPipe();
     const local = $("graft-local-video");
     local.srcObject = camera;
     local.style.transform = "scaleX(-1)";
     await local.play().catch(() => undefined);
-    $("status").textContent = `${SHOT_META[dir].label} · ${Math.min(shotIndex + 1, 4)}/4`;
-    renderThumbs();
-    updateButtons();
-  }
-
-  async function startCapture() {
-    if (connecting) return;
-    connecting = true;
-    setError("");
-    updateButtons();
-    const epoch = ++cameraEpoch;
-    try {
-      await ensureCamera();
-      if (epoch !== cameraEpoch || !isActive()) return;
-      shotIndex = 0;
-      retakeDir = null;
-      await enterCaptureStep();
-    } catch (cause) {
-      resetAll();
-      setError(cause?.code === "camera-denied" ? "카메라 권한을 허용해주세요" : (cause?.message || "카메라를 열지 못했어요"));
-    } finally {
-      connecting = false;
-      updateButtons();
-    }
-  }
-
-  /** Wait until bangs are pushed aside (front only). */
-  async function waitForeheadClear(local) {
-    const warn = $("graft-capture-warn");
-    const deadline = Date.now() + 8000;
-    while (true) {
-      try {
-        await measureFrame(local, { pose: "front" });
-        if (warn) warn.hidden = true;
-        return;
-      } catch (cause) {
-        if (cause?.code !== "forehead-bangs") throw cause;
-        if (warn) {
-          warn.hidden = false;
-          warn.textContent = cause.message;
-        }
-        $("status").textContent = cause.message;
-        if (Date.now() >= deadline) throw cause;
-        await new Promise((r) => setTimeout(r, 280));
-      }
-    }
-  }
-
-  async function takeShutter() {
-    if (screen !== "capture" || !camera) return;
-    const dir = retakeDir || SHOT_ORDER[shotIndex];
-    const local = $("graft-local-video");
-    connecting = true;
-    updateButtons();
-    try {
-      if (dir === "front") await waitForeheadClear(local);
-      const pose = dir === "crown" ? "crown" : "front";
-      const measured = await measureWithStabilization(local, { pose, samples: 5, intervalMs: 40 });
-      const blob = await new Promise((resolve, reject) => {
-        measured.frameCanvas.toBlob((b) => (b ? resolve(b) : reject(new Error("frame-encode"))), "image/jpeg", 0.92);
-      });
-
-      let yaw = 0;
-      let pitch = dir === "crown" ? 40 : 0;
-      if (measured.measure.kind === "front" && measured.measure.templeLeft && measured.measure.templeRight) {
-        const tl = measured.measure.templeLeft;
-        const tr = measured.measure.templeRight;
-        const mid = (tl.x + tr.x) / 2;
-        const half = Math.max(1, Math.abs(tr.x - tl.x) / 2);
-        const hx = measured.measure.hairlineCurve?.[Math.floor(measured.measure.hairlineCurve.length / 2)]?.x ?? mid;
-        yaw = ((hx - mid) / half) * 35;
-      }
-
-      const hairRatio = measured.hairMask.reduce((a, v) => a + v, 0)
-        / (measured.measure.width * measured.measure.height);
-      const quality = evaluateShotQuality({
-        direction: dir,
-        yaw,
-        pitch,
-        faceCount: 1,
-        brightness: meanBrightness(measured.imageData),
-        motion: 0,
-        hairRatio,
-      });
-
-      if (shots[dir]?.thumbUrl) URL.revokeObjectURL(shots[dir].thumbUrl);
-      shots[dir] = {
-        bundle: {
-          pose: measured.measure.kind,
-          imageData: measured.imageData,
-          hairMask: measured.hairMask,
-          faceMask: measured.faceMask,
-          measure: measured.measure,
-          frameBlob: blob,
-        },
-        blob,
-        thumbUrl: URL.createObjectURL(blob),
-        quality,
-        yaw,
-        pitch,
-      };
-
-      const warn = $("graft-capture-warn");
-      if (quality.warnings.length) {
-        warn.hidden = false;
-        warn.textContent = `${quality.warnings.join(" · ")} (다시 찍을 수 있어요)`;
-      } else warn.hidden = true;
-
-      if (retakeDir) {
-        retakeDir = null;
-        const nextMissing = SHOT_ORDER.findIndex((d) => !shots[d]);
-        shotIndex = nextMissing >= 0 ? nextMissing : SHOT_ORDER.length - 1;
-      } else if (shotIndex < SHOT_ORDER.length - 1) {
-        shotIndex += 1;
-      }
-
-      renderThumbs();
-      if (SHOT_ORDER.every((d) => shots[d])) {
-        $("status").textContent = "4장 준비됨. 결과 보기를 누르세요";
-      } else {
-        await enterCaptureStep();
-      }
-    } catch (cause) {
-      setError(cause?.message || "촬영에 실패했어요");
-    } finally {
-      connecting = false;
-      renderThumbs();
-      updateButtons();
-    }
-  }
-
-  function ensureBaseline(a) {
-    if (baselineCache.has(a)) return baselineCache.get(a);
-    const shot = a === "crown" ? shots.crown : shots.front;
-    if (!shot) return null;
-    const built = buildBaselineLoss({
-      area: a,
-      measure: shot.bundle.measure,
-      imageData: shot.bundle.imageData,
-      hairMask: shot.bundle.hairMask,
-      faceMask: shot.bundle.faceMask,
+    setCaptureGuide(pose);
+    $("graft-capture-layer").hidden = false;
+    $("stage-label").hidden = true;
+    await runCountdown(3);
+    const skipForehead = testMode() || pose === "crown";
+    // Frame copy only — never stop/replace camera tracks (unlike selfie.js).
+    const measured = await captureGraftStill(local, {
+      pose,
+      samples: 5,
+      intervalMs: 40,
+      skipForeheadCheck: skipForehead,
     });
-    baselineCache.set(a, built);
-    return built;
+    const blob = await canvasToJpeg(measured.frameCanvas);
+    return { blob, measured, pose };
   }
 
-  async function generateStill(a, g) {
-    const view = a === "crown" ? "crown" : "front";
-    const key = cacheKey(a, g, view);
-    if (stillCache.has(key)) return stillCache.get(key);
-    if (!baselineOn() && analysis?.needs && !analysis.needs[a]) return null;
-    const shot = a === "crown" ? shots.crown : shots.front;
-    const baseline = baselineOn() ? ensureBaseline(a) : null;
-    const masked = await buildGraftMask({
-      imageData: shot.bundle.imageData,
-      hairMask: shot.bundle.hairMask,
-      measure: shot.bundle.measure,
-      area: a,
-      grafts: g,
-      baselineLoss: baseline,
-    });
-    if (masked.stats.filledPixels < 8) return null;
-    const personBlob = baseline
-      ? await rgbaToJpegBlob(baseline.imageData)
-      : shot.blob;
-    const response = await fetch("/graft-inpaint", {
+  function setCaptureGuide(pose) {
+    $("graft-guide-front").hidden = pose !== "front";
+    $("graft-guide-left").hidden = true;
+    $("graft-guide-right").hidden = true;
+    $("graft-guide-crown").hidden = pose !== "crown";
+    $("graft-capture-hint").textContent = pose === "crown"
+      ? "고개를 숙여 정수리가 보이게 해주세요"
+      : "정면을 바라봐 주세요";
+    $("graft-capture-warn").hidden = true;
+  }
+
+  async function requestBaseline(prefillBlob, maskBlob, pose = "front") {
+    $("status").textContent = "시술 전 모습을 만드는 중…";
+    showBaselineBanner(false);
+    const response = await fetch("/baseline", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        person: await blobToDataUrl(personBlob),
-        mask: await blobToDataUrl(masked.mask),
-        area: a,
-        grafts: g,
-        view,
-        sessionId: graftSessionId,
-        analysis: analysis
-          ? { color: analysis.color, length: analysis.length, type: analysis.type }
-          : undefined,
+        person: await blobToDataUrl(prefillBlob),
+        mask: await blobToDataUrl(maskBlob),
+        pose,
         ...(getEditModel() ? { editModel: getEditModel() } : {}),
       }),
-      signal: prefetchAbort?.signal,
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || "생성 실패");
-    const entry = {
+    if (!response.ok) {
+      const error = new Error(body.error || "시술 전 이미지를 만들지 못했어요");
+      error.code = "baseline-fail";
+      throw error;
+    }
+    return {
       blob: dataUrlToBlob(body.image),
-      meta: { ...body, stats: masked.stats, area: a, grafts: g, view, baseline: Boolean(baseline) },
-      mask: masked.mask,
-      personBlob,
+      meta: body,
     };
-    stillCache.set(key, entry);
-    rememberStrip(a, g, entry, baseline, shot);
-    updateButtons();
+  }
+
+  async function measureBaselineBlob(blob, { pose = "front" } = {}) {
+    const img = await imageFromBlob(blob);
+    // Measure a still image — no live MediaStream involved.
+    const { measureFrame } = await import("./faceGeometry.js");
+    return measureFrame(img, {
+      pose,
+      skipForeheadCheck: testMode() || pose === "crown",
+    });
+  }
+
+  function showBaselineBanner(on, message = "") {
+    const banner = $("graft-baseline-banner");
+    if (!banner) return;
+    if (!on) {
+      banner.hidden = true;
+      return;
+    }
+    banner.hidden = false;
+    $("graft-baseline-message").textContent = message || "시술 전 이미지를 만들지 못했어요";
+  }
+
+  async function buildAndCacheMask(a, g) {
+    const key = comboKeyFor(a, g);
+    if (guideCache.has(key) && guideCache.get(key).maskBlob) return guideCache.get(key);
+    const base = a === "crown" ? baselineCrown : baselineFront;
+    if (!base?.bundle) throw new Error("기준선이 없어요");
+    const built = await buildGraftMask({
+      measure: base.bundle.measure,
+      area: a,
+      grafts: g,
+    });
+    const prefill = await buildPrefillGuide({
+      imageData: base.bundle.imageData,
+      measure: base.bundle.measure,
+      area: a,
+      grafts: g,
+      fillMask: built.fillMask,
+    });
+    const entry = {
+      blob: built.mask,
+      maskBlob: built.mask,
+      prefillBlob: prefill.prefillGuide,
+      stats: { ...built.stats, prefill: prefill.stats },
+      area: a,
+      grafts: g,
+    };
+    guideCache.set(key, entry);
     updateLab();
     return entry;
   }
 
-  function rememberStrip(a, g, entry, baseline, shot) {
-    if (!isLab) return;
-    const row = stripCache.get(a) || { capture: shot.blob, baseline: null, levels: {} };
-    row.capture = shot.blob;
-    if (baseline) {
-      row.baseline = baseline;
-      row.baselineBlobPromise = row.baselineBlobPromise || rgbaToJpegBlob(baseline.imageData);
+  async function requestGraftFill(a, g) {
+    const key = comboKeyFor(a, g);
+    const existing = fillCache.get(key);
+    if (existing && (existing.status === "ready" || existing.status === "pending")) {
+      return existing;
     }
-    row.levels[g] = entry;
-    stripCache.set(a, row);
-  }
-
-  async function startPrefetch() {
-    prefetchAbort?.abort();
-    prefetchAbort = new AbortController();
-    const mode = getPrefetchMode();
-    let areas;
-    if (baselineOn()) areas = [...GRAFT_AREAS];
-    else if (mode === "all") areas = [...GRAFT_AREAS];
-    else areas = GRAFT_AREAS.filter((a) => analysis?.needs?.[a]);
-    if (baselineOn()) {
-      for (const a of areas) ensureBaseline(a);
-    }
-    const order = prefetchOrder(
-      analysis?.preferredArea || "hairline",
-      GRAFT_LEVELS,
-      areas.length ? areas : [...GRAFT_AREAS],
-    );
-    for (const item of order) {
-      if (prefetchAbort.signal.aborted) break;
-      try {
-        $("status").textContent = `미리 생성 중… ${item.area} ${item.grafts}모`;
-        await generateStill(item.area, item.grafts);
-      } catch (cause) {
-        if (cause.name === "AbortError") break;
-        console.warn("prefetch", cause);
-      }
-    }
-    if (!prefetchAbort.signal.aborted) $("status").textContent = "준비됨. 부위·모량을 바꿔 보세요";
-    updateButtons();
+    const base = a === "crown" ? baselineCrown : baselineFront;
+    if (!base?.blob) throw new Error("기준선이 없어요");
+    const maskEntry = await buildAndCacheMask(a, g);
+    const rule = ruleFor(a, g);
+    const entry = {
+      status: "pending",
+      blob: null,
+      prefillBlob: maskEntry.prefillBlob,
+      meta: null,
+      maskBlob: maskEntry.maskBlob,
+      stats: maskEntry.stats,
+      error: null,
+      area: a,
+      grafts: g,
+    };
+    fillCache.set(key, entry);
+    updateChip();
     updateLab();
+    const fillStarted = Date.now();
+    try {
+      if (fillMode() === "prefill") {
+        entry.status = "ready";
+        entry.blob = maskEntry.prefillBlob;
+        entry.meta = {
+          ms: Date.now() - fillStarted,
+          estimatedCostUsd: 0,
+          model: "prefill",
+          densityLabel: rule.density <= 0.7 ? "sparse" : rule.density <= 0.85 ? "medium" : "dense",
+          refined: false,
+        };
+        labTimings.fills[key] = entry.meta.ms;
+        fillCache.set(key, entry);
+        updateLab();
+        updateChip();
+        return entry;
+      }
+      const response = await fetch("/graft-fill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          person: await blobToDataUrl(maskEntry.prefillBlob),
+          mask: await blobToDataUrl(maskEntry.maskBlob),
+          area: a,
+          grafts: g,
+          density: rule.density,
+          ...(getEditModel() ? { editModel: getEditModel() } : {}),
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        // Gemini fail → use prefillGuide
+        entry.status = "ready";
+        entry.blob = maskEntry.prefillBlob;
+        entry.meta = {
+          ms: Date.now() - fillStarted,
+          estimatedCostUsd: 0,
+          model: "prefill-fallback",
+          densityLabel: body.densityLabel,
+          refined: false,
+          fallback: true,
+        };
+      } else {
+        entry.status = "ready";
+        entry.blob = dataUrlToBlob(body.image);
+        entry.meta = { ...body, refined: true };
+      }
+      labTimings.fills[key] = entry.meta.ms ?? (Date.now() - fillStarted);
+      fillCache.set(key, entry);
+      updateLab();
+      updateChip();
+      return entry;
+    } catch (cause) {
+      // Network / unexpected → still fall back to prefill
+      entry.status = "ready";
+      entry.blob = maskEntry.prefillBlob;
+      entry.meta = {
+        ms: Date.now() - fillStarted,
+        estimatedCostUsd: 0,
+        model: "prefill-fallback",
+        refined: false,
+        fallback: true,
+        error: cause?.message,
+      };
+      labTimings.fills[key] = entry.meta.ms;
+      fillCache.set(key, entry);
+      updateChip();
+      updateLab();
+      return entry;
+    }
   }
 
-  async function pushStill({ force = false } = {}) {
-    void force;
-    if (!session || session.stopped) return false;
-    if (showBaseline) {
-      const bl = ensureBaseline(area);
-      if (!bl) {
-        setError("기준선이 아직 없어요");
-        return false;
+  function prefetchFillsForArea(a) {
+    for (const g of GRAFT_LEVELS) {
+      void requestGraftFill(a, g).catch(() => undefined);
+    }
+  }
+
+  async function waitForFill(a, g, { timeoutMs = 90000 } = {}) {
+    const key = comboKeyFor(a, g);
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const entry = fillCache.get(key);
+      if (entry?.status === "ready" && entry.blob) return entry;
+      if (entry?.status === "error") throw new Error(entry.error || "채움 실패");
+      if (!entry || entry.status !== "pending") {
+        void requestGraftFill(a, g).catch(() => undefined);
       }
-      const blob = await rgbaToJpegBlob(bl.imageData);
-      const t0 = performance.now();
-      await session.select(`baseline_${area}`, {
+      await new Promise((r) => setTimeout(r, 80));
+      updateChip();
+    }
+    throw new Error("모발 채우기 이미지를 만들지 못했어요. 다시 시도해 주세요.");
+  }
+
+  async function pushGuide({ forceBaseline = false } = {}) {
+    if (!session || session.stopped) return false;
+    const base = activeBaseline();
+    if (!base) return false;
+    if (forceBaseline || holdBaseline) {
+      await session.select("baseline", {
         prompt: promptForArea(area),
-        image: blob,
+        image: lucyBaselineBlob || base.blob,
         enhance: enhanceFlag(),
       }, { force: true });
-      const ms = Math.round(performance.now() - t0);
-      if (isLab && $("graft-lab-switch-ms")) $("graft-lab-switch-ms").textContent = `set() ${ms}ms (기준선)`;
-      updateSimLabel();
+      updateChip();
       return true;
     }
-    const view = area === "crown" ? "crown" : liveView === "crown" ? "crown" : "front";
-    let entry = stillCache.get(cacheKey(area, grafts, view === "crown" && area !== "crown" ? "front" : (area === "crown" ? "crown" : "front")));
-    if (!entry) {
-      try {
-        entry = await generateStill(area, grafts);
-      } catch (cause) {
-        setError(cause?.message || "아직 준비 중이에요");
-        return false;
+    const key = comboKeyFor(area, grafts);
+    let entry = fillCache.get(key);
+    if (!entry || entry.status !== "ready") {
+      updateChip();
+      if (!entry || entry.status !== "pending") {
+        void requestGraftFill(area, grafts).catch(() => undefined);
       }
+      // Keep previous Lucy image until the fill for this combo is ready.
+      if (entry?.status === "pending" || !entry) return false;
+      if (entry.status === "error") throw new Error(entry.error || "채움 실패");
     }
-    if (!entry) {
-      setError("이 부위는 현재 상태로 충분해요");
-      return false;
-    }
-    const t0 = performance.now();
-    await session.select(comboKeyFor(area, grafts), {
+    entry = fillCache.get(key);
+    await session.select(key, {
       prompt: promptForArea(area),
       image: entry.blob,
       enhance: enhanceFlag(),
     }, { force: true });
-    const ms = Math.round(performance.now() - t0);
-    if (isLab && $("graft-lab-switch-ms")) $("graft-lab-switch-ms").textContent = `set() ${ms}ms`;
-    updateSimLabel();
+    updateChip();
     return true;
   }
 
-  async function startSplitLive() {
+  async function prepareLucyBaselineImage() {
+    const source = baselineFront?.blob;
+    if (!source) throw new Error("기준선이 없어요");
+    await closeMediaPipe();
+    const normalized = await normalizeLucyJpeg(source);
+    lucyBaselineBlob = normalized.blob;
+    return lucyBaselineBlob;
+  }
+
+  async function startLiveWithBaseline() {
     const sdk = await import("@decartai/sdk");
     const model = sdk.models.realtime("lucy-2.5");
-    try {
-      await generateStill(area, grafts);
-    } catch { /* prefetch continues */ }
-
-    const still = stillCache.get(cacheKey(area, grafts, area === "crown" ? "crown" : "front"));
+    // Detach preview element without stopping tracks (Lucy will use the same stream).
+    const local = $("graft-local-video");
+    if (local) local.srcObject = null;
     $("graft-capture-layer").hidden = true;
-    $("graft-split").hidden = false;
-    $("stage").classList.add("graft-split-on");
-    mountOutputInSplit();
+
+    const baselineBlob = lucyBaselineBlob || baselineFront?.blob;
+    if (!baselineBlob) throw new Error("기준선이 없어요");
+
+    const promptText = promptForArea(area);
+    const enhance = enhanceFlag();
+    const initialState = {
+      prompt: { text: promptText, enhance },
+      image: baselineBlob,
+    };
 
     const active = new RealtimeSession({
-      mode: "ref",
+      mode: "graft",
       anchor: getAnchor(),
-      combo: comboKeyFor(area, grafts),
+      combo: "baseline",
       experienceType: "preset",
       onState: () => updateButtons(),
       onTick: (billed) => {
@@ -634,17 +607,15 @@ export function createGraftFlow({
         $("time-bar").value = left;
       },
       onRemote: (remote) => {
-        if (!isActive() || active.stopped || holdOriginal) return;
-        $("output").srcObject = remote;
-        $("output").style.transform = "none";
-        $("output").hidden = false;
-        $("output").play?.().catch(() => undefined);
+        if (!isActive() || active.stopped) return;
+        const out = $("output");
+        out.srcObject = remote;
+        out.style.transform = "none";
+        out.hidden = false;
+        out.onloadedmetadata = () => updateButtons();
+        out.onplaying = () => updateButtons();
+        out.play?.().then(() => updateButtons()).catch(() => undefined);
         updateButtons();
-        if (getDelaySync() && delayed) {
-          void estimateStreamLagMs($("graft-live-original"), $("output")).then((ms) => {
-            if (ms > 0) delayed.setDelay(ms);
-          });
-        }
       },
       onError: (message) => {
         setError(message);
@@ -661,99 +632,370 @@ export function createGraftFlow({
     active.sessionId = tokenPayload.sessionId;
     session = active;
     screen = "live";
-
-    delayed?.stop();
-    delayed = createDelayedStream(camera, { delayMs: getDelaySync() ? 200 : 0 });
-    const orig = $("graft-live-original");
-    orig.srcObject = delayed.stream;
-    orig.style.transform = "scaleX(-1)";
-    orig.play?.().catch(() => undefined);
-    $("graft-hold-original")?.classList.remove("is-hidden");
-
+    holdBaseline = false;
     updateButtons();
     ensureLab();
+
+    blockMediaPipe(3000);
 
     await active.start(
       camera,
       async () => tokenPayload,
-      (media, options, token) => sdk.createDecartClient({ apiKey: token, logger: sdk.noopLogger }).realtime.connect(media, options),
+      async (media, options, token) => {
+        let lastSdkError = "";
+        const baseLogger = isLab ? labSdkLogger(sdk) : sdk.noopLogger;
+        const logger = {
+          debug: (...args) => baseLogger.debug(...args),
+          info: (...args) => baseLogger.info(...args),
+          warn: (...args) => baseLogger.warn(...args),
+          error: (message, data) => {
+            const detail = data?.error ?? data?.message ?? message;
+            if (detail) {
+              const text = String(typeof detail === "string" ? detail : detail?.message || detail);
+              if (!/stale connect attempt/i.test(text)) lastSdkError = text;
+              else if (!lastSdkError) lastSdkError = text;
+            }
+            baseLogger.error(message, data);
+          },
+        };
+        const client = sdk.createDecartClient({ apiKey: token, logger });
+        try {
+          return await client.realtime.connect(media, options);
+        } catch (error) {
+          const thrown = error?.message || String(error);
+          const message = lastSdkError && /stale connect attempt/i.test(thrown)
+            ? lastSdkError
+            : (lastSdkError || thrown);
+          console.info(`connect-failed message=${message}`);
+          const wrapped = new Error(message);
+          wrapped.connectFailed = true;
+          wrapped.cause = error;
+          throw wrapped;
+        }
+      },
       {
         model,
         mirror: "auto",
         resolution: "720p",
-        initialState: {
-          prompt: { text: promptForArea(area), enhance: enhanceFlag() },
-          image: still?.blob || shots.front.blob,
-        },
+        initialState,
       },
     );
-    startPoseWatch();
+    blockMediaPipe(3000);
+    $("status").textContent = "준비됨. 부위·모량을 바꿔 보세요";
+    updateChip();
+    updateLab();
   }
 
-  function startPoseWatch() {
-    if (poseTimer) clearInterval(poseTimer);
-    poseTimer = setInterval(() => {
-      if (screen !== "live" || !session || session.stopped) return;
-      const next = area === "crown" ? "crown" : livePoseFromAngles(shots.front?.yaw ?? 0, 0);
-      if (next !== liveView) {
-        liveView = next;
-        void pushStill({ force: true });
-      }
-    }, 800);
+  async function assembleBaselineBundle(blob, measured, meta) {
+    return {
+      blob,
+      meta,
+      bundle: {
+        imageData: measured.imageData,
+        hairMask: measured.hairMask,
+        faceMask: measured.faceMask,
+        measure: measured.measure,
+      },
+    };
   }
 
-  async function onResults() {
-    if (!SHOT_ORDER.every((d) => shots[d])) return;
-    connecting = true;
-    updateButtons();
-    try {
-      $("graft-capture-layer").hidden = true;
-      $("status").textContent = "머리 상태 분석 중…";
-      screen = "prefetch";
-      analysis = analyzeHairFromShots({
-        front: shots.front.bundle,
-        left: shots.left.bundle,
-        right: shots.right.bundle,
-        crown: shots.crown.bundle,
+  async function prepareFrontBaselineFromCapture(captured) {
+    captureBlob = captured.blob;
+    const measuredBundle = captured.measured || await measureBaselineBlob(captured.blob, { pose: "front" });
+    if (measuredBundle?.measure) {
+      captureMeasure = measuredBundle.measure;
+      captureExposeCm = foreheadExposeCm(captureMeasure);
+    }
+
+    if (!testMode()) {
+      baselineFront = await assembleBaselineBundle(captured.blob, measuredBundle, {
+        pose: "front",
+        ms: 0,
+        estimatedCostUsd: 0,
+        model: "capture",
       });
-      area = analysis.preferredArea;
-      grafts = 2000;
-      showBaseline = false;
+      baselineExposeCm = foreheadExposeCm(baselineFront.bundle.measure);
+      prefetchFillsForArea("hairline");
+      return;
+    }
 
+    $("status").textContent = "시술 전 모습을 만드는 중…";
+    const prefillStarted = Date.now();
+    const imageData = measuredBundle.imageData
+      || (await measureBaselineBlob(captured.blob, { pose: "front" })).imageData;
+    const hairMask = measuredBundle.hairMask;
+    const prefilled = await prefillBaseline({
+      imageData,
+      hairMask,
+      measure: captureMeasure,
+    });
+    labTimings.prefillMs = Date.now() - prefillStarted;
+    prefillBaselineBlob = prefilled.prefillBaseline;
+    baldMaskBlob = prefilled.baldMask;
+
+    let finalBlob = prefillBaselineBlob;
+    let meta = {
+      pose: "front",
+      ms: labTimings.prefillMs,
+      estimatedCostUsd: 0,
+      model: "prefill",
+      refined: false,
+    };
+
+    if (baselineMode() === "refined") {
+      try {
+        const edited = await requestBaseline(prefillBaselineBlob, baldMaskBlob, "front");
+        labTimings.refineMs = edited.meta?.ms ?? null;
+        finalBlob = edited.blob;
+        meta = { ...edited.meta, refined: true, prefillMs: labTimings.prefillMs };
+      } catch (cause) {
+        // Gemini fail → keep prefill
+        console.info("baseline refine failed — using prefill", cause?.message);
+        meta = {
+          ...meta,
+          fallback: true,
+          refineError: cause?.message,
+        };
+      }
+    }
+
+    const measured = await measureBaselineBlob(finalBlob, { pose: "front" });
+    const expose = foreheadExposeCm(measured.measure);
+    try {
+      assertBaselineForeheadGain({
+        captureCm: captureExposeCm,
+        baselineCm: expose,
+      });
+      baselineExposeCm = expose;
+      baselineFront = await assembleBaselineBundle(finalBlob, measured, meta);
+    } catch (cause) {
+      if (cause?.code === "baseline-forehead-fail") {
+        // Use prefillBaseline instead of Gemini result; do not regenerate.
+        console.info("baseline forehead gain fail — using prefillBaseline", {
+          captureCm: cause.captureCm,
+          baselineCm: cause.baselineCm,
+          gainCm: cause.gainCm,
+        });
+        const prefillMeasured = await measureBaselineBlob(prefillBaselineBlob, { pose: "front" });
+        baselineExposeCm = foreheadExposeCm(prefillMeasured.measure);
+        baselineFront = await assembleBaselineBundle(prefillBaselineBlob, prefillMeasured, {
+          pose: "front",
+          ms: labTimings.prefillMs,
+          estimatedCostUsd: 0,
+          model: "prefill",
+          refined: false,
+          foreheadFallback: true,
+        });
+      } else {
+        throw cause;
+      }
+    }
+    prefetchFillsForArea("hairline");
+  }
+
+  async function startFrontFlow() {
+    if (connecting) return;
+    connecting = true;
+    setError("");
+    lastBaselineError = null;
+    showBaselineBanner(false);
+    updateButtons();
+    const epoch = ++cameraEpoch;
+    try {
+      await ensureCamera();
+      if (epoch !== cameraEpoch || !isActive()) return;
+      screen = "capture";
+      pendingCapture = "front";
+      $("status").textContent = "정면 촬영";
+      // 1) Capture (tracks stay live)
+      const captured = await captureFromVideo({ pose: "front" });
+      if (epoch !== cameraEpoch || !isActive()) return;
+      if (typeof window !== "undefined") {
+        window.__graftLastCaptureTracks = streamTrackStates(camera);
+      }
+
+      // 2) Baseline complete before any token (includes MediaPipe remeasure in test mode)
+      await prepareFrontBaselineFromCapture(captured);
+      if (epoch !== cameraEpoch || !isActive()) return;
+
+      area = "hairline";
+      grafts = 2000;
+      guideCache = new Map();
+      // Prefetch already started in prepareFrontBaselineFromCapture
+
+      // MediaPipe done → normalize Lucy image → then token → connect
+      await prepareLucyBaselineImage();
+      if (epoch !== cameraEpoch || !isActive()) return;
+
+      // 3) Token only after baseline is ready
       const tokenRes = await fetch("/token", { method: "POST" });
       tokenPayload = await tokenRes.json();
       if (!tokenRes.ok) throw new Error(tokenPayload.error || "세션을 만들지 못했어요");
-      graftSessionId = tokenPayload.sessionId;
 
-      void startPrefetch();
-      await startSplitLive();
+      // 4) Lucy connect with initialState.image = baseline (mode C)
+      await startLiveWithBaseline();
     } catch (cause) {
-      setError(cause?.message || "결과 준비에 실패했어요");
-      screen = "capture";
-      $("graft-capture-layer").hidden = false;
+      if (cause?.code === "baseline-fail" || cause?.code === "baseline-forehead-fail" || /시술 전/.test(cause?.message || "")) {
+        lastBaselineError = cause;
+        showBaselineBanner(true, cause.message);
+        setError(cause.message);
+        screen = "idle";
+        showIdleStage();
+        $("graft-capture-layer").hidden = true;
+      } else {
+        resetAll();
+        setError(cause?.code === "camera-denied"
+          ? "카메라 권한을 허용해주세요"
+          : (cause?.message || "촬영에 실패했어요"));
+      }
     } finally {
       connecting = false;
       updateButtons();
     }
   }
 
-  async function changeSelection({ nextArea = area, nextGrafts = grafts, baseline = false } = {}) {
-    const same = nextArea === area && nextGrafts === grafts && baseline === showBaseline;
-    if (same) return;
+  async function retryBaseline() {
+    if (!captureBlob || connecting) return;
+    connecting = true;
+    setError("");
+    updateButtons();
+    try {
+      // Baseline first — no token until ready
+      await prepareFrontBaselineFromCapture({
+        blob: captureBlob,
+        measured: null,
+      });
+      if (!baselineFront.bundle) {
+        const measured = await measureBaselineBlob(baselineFront.blob, { pose: "front" });
+        baselineFront.bundle = {
+          imageData: measured.imageData,
+          hairMask: measured.hairMask,
+          faceMask: measured.faceMask,
+          measure: measured.measure,
+        };
+      }
+      await prepareLucyBaselineImage();
+      const tokenRes = await fetch("/token", { method: "POST" });
+      tokenPayload = await tokenRes.json();
+      if (!tokenRes.ok) throw new Error(tokenPayload.error || "세션을 만들지 못했어요");
+      await ensureCamera();
+      showBaselineBanner(false);
+      guideCache = new Map();
+      fillCache = new Map();
+      prefetchFillsForArea(area);
+      await startLiveWithBaseline();
+    } catch (cause) {
+      lastBaselineError = cause;
+      showBaselineBanner(true, cause?.message || "시술 전 이미지를 만들지 못했어요");
+      setError(cause?.message || "시술 전 이미지를 만들지 못했어요");
+    } finally {
+      connecting = false;
+      updateButtons();
+    }
+  }
+
+  async function ensureCrownBaseline() {
+    if (baselineCrown) return baselineCrown;
+    connecting = true;
+    updateButtons();
+    try {
+      $("status").textContent = "고개를 숙여주세요";
+      screen = "capture";
+      const captured = await captureFromVideo({ pose: "crown" });
+      let blob = captured.blob;
+      let meta = { pose: "crown", ms: 0, estimatedCostUsd: 0, model: "capture" };
+      if (testMode()) {
+        const prefilled = await prefillBaseline({
+          imageData: captured.measured.imageData,
+          hairMask: captured.measured.hairMask,
+          measure: {
+            ...captured.measured.measure,
+            browTopY: captured.measured.measure.browTopY ?? captured.measured.measure.height * 0.35,
+            faceHeightPx: captured.measured.measure.faceHeightPx
+              || captured.measured.measure.height * 0.4,
+            faceCenterX: captured.measured.measure.crownCenter?.x
+              || captured.measured.measure.width / 2,
+            templeLeft: { x: captured.measured.measure.width * 0.2, y: captured.measured.measure.height * 0.4 },
+            templeRight: { x: captured.measured.measure.width * 0.8, y: captured.measured.measure.height * 0.4 },
+            pxPerCm: captured.measured.measure.pxPerCm,
+          },
+        });
+        blob = prefilled.prefillBaseline;
+        meta = { pose: "crown", ms: 0, estimatedCostUsd: 0, model: "prefill", refined: false };
+        if (baselineMode() === "refined") {
+          try {
+            const edited = await requestBaseline(prefilled.prefillBaseline, prefilled.baldMask, "crown");
+            blob = edited.blob;
+            meta = { ...edited.meta, refined: true };
+          } catch {
+            /* keep prefill */
+          }
+        }
+      }
+      const measured = testMode()
+        ? await measureBaselineBlob(blob, { pose: "crown" })
+        : captured.measured;
+      baselineCrown = {
+        blob,
+        meta,
+        bundle: {
+          imageData: measured.imageData,
+          hairMask: measured.hairMask,
+          faceMask: measured.faceMask,
+          measure: measured.measure,
+        },
+      };
+      await closeMediaPipe();
+      $("graft-capture-layer").hidden = true;
+      screen = "live";
+      prefetchFillsForArea("crown");
+      return baselineCrown;
+    } finally {
+      connecting = false;
+      updateButtons();
+    }
+  }
+
+  async function changeSelection({ nextArea = area, nextGrafts = grafts } = {}) {
+    const nextKey = comboKeyFor(nextArea, nextGrafts);
+    if (nextArea === area && nextGrafts === grafts && session?.combo === nextKey) return;
+    const areaChanged = nextArea !== area;
     area = nextArea;
     grafts = nextGrafts;
-    showBaseline = Boolean(baseline) && baselineOn();
+    holdBaseline = false;
+    selectionTouched = true;
     updateButtons();
-    if (!baselineOn() && analysis?.needs && !analysis.needs[nextArea] && !showBaseline) {
-      setError("현재 상태로 충분 — 머리를 덧붙이지 않습니다");
-      return;
-    }
+    updateChip();
     if (screen !== "live") return;
     switching = true;
     updateButtons();
     try {
       setError("");
-      await pushStill({ force: true });
+      if (area === "crown") await ensureCrownBaseline();
+      if (areaChanged) prefetchFillsForArea(area);
+      const fill = fillCache.get(comboKeyFor(area, grafts));
+      if (fill?.status === "ready") {
+        await pushGuide();
+      } else {
+        // Keep previous Lucy frame; chip shows "준비 중" until ready then set().
+        updateChip();
+        void (async () => {
+          try {
+            await waitForFill(area, grafts);
+            if (session && !session.stopped && !holdBaseline
+              && comboKeyFor(area, grafts) === nextKey) {
+              await pushGuide();
+            }
+          } catch (cause) {
+            if (comboKeyFor(area, grafts) === nextKey) {
+              setError(cause?.message || "전환에 실패했어요");
+            }
+          } finally {
+            updateButtons();
+            updateChip();
+          }
+        })();
+      }
     } catch (cause) {
       setError(cause?.message || "전환에 실패했어요");
     } finally {
@@ -762,26 +1004,23 @@ export function createGraftFlow({
     }
   }
 
-  function bindHoldOriginal() {
-    const apply = (on) => {
-      holdOriginal = on;
-      if (!session) return;
-      if (on) {
-        $("output").srcObject = delayed?.stream || camera;
-        $("output").style.transform = "scaleX(-1)";
-      } else if (session.remoteStream) {
-        $("output").srcObject = session.remoteStream;
-        $("output").style.transform = "none";
+  function bindHoldBaseline() {
+    const btn = $("graft-hold-baseline");
+    if (!btn) return;
+    const apply = async (on) => {
+      holdBaseline = on;
+      updateChip();
+      if (!session || session.stopped) return;
+      try {
+        await pushGuide({ forceBaseline: on });
+      } catch {
+        /* ignore hold glitches */
       }
-      updateSimLabel();
     };
-    for (const id of ["graft-hold-original", "graft-original-btn"]) {
-      const btn = $(id);
-      if (!btn) continue;
-      btn.addEventListener("pointerdown", () => apply(true));
-      btn.addEventListener("pointerup", () => apply(false));
-      btn.addEventListener("pointerleave", () => apply(false));
-    }
+    btn.addEventListener("pointerdown", () => { void apply(true); });
+    btn.addEventListener("pointerup", () => { void apply(false); });
+    btn.addEventListener("pointerleave", () => { void apply(false); });
+    btn.addEventListener("pointercancel", () => { void apply(false); });
   }
 
   function ensureLab() {
@@ -796,169 +1035,133 @@ export function createGraftFlow({
     panel.className = "ref-lab-debug graft-lab-still";
     panel.innerHTML = `
       <h2 class="graft-lab-title">모수 /lab</h2>
-      <p class="fine">Lucy는 reference 이미지 1장만 받습니다. set() 교체는 문서상 near-instant(실측 ms는 아래).</p>
-      <label class="check">가상 탈모
-        <input type="checkbox" id="graft-lab-baseline" checked>
-        <span id="graft-lab-baseline-label">켜짐</span>
+      <label class="check">테스트 모드
+        <input type="checkbox" id="graft-lab-testmode" checked>
+        <span id="graft-lab-testmode-label">켜짐</span>
       </label>
-      <label class="check">미리생성
-        <select id="graft-lab-prefetch">
-          <option value="preferred">판정 부위만</option>
-          <option value="all">9개 전부</option>
-        </select>
-      </label>
-      <label class="check"><input type="checkbox" id="graft-lab-delay" checked> 원본 지연 동기화</label>
       <label class="check"><input type="checkbox" id="graft-lab-enhance"> enhance</label>
-      <pre id="graft-lab-analysis"></pre>
-      <div id="graft-lab-thumbs" class="graft-thumbs"></div>
-      <div id="graft-lab-strips" class="graft-lab-strips"></div>
-      <button type="button" id="graft-lab-save-strips">5장 한 번에 저장</button>
+      <pre id="graft-lab-meta"></pre>
+      <div class="graft-lab-strips">
+        <div class="graft-lab-strip-row">
+          <h3>원본 / 탈모마스크 / prefillBaseline / 최종기준선 / prefillGuide×3 / 최종가이드×3</h3>
+          <div id="graft-lab-strip" class="graft-lab-strip"></div>
+        </div>
+      </div>
+      <button type="button" id="graft-lab-save-strips">5장 저장</button>
       <div id="graft-lab-grid" class="ref-lab-candidates"></div>
-      <pre id="graft-lab-switch-ms"></pre>
-      <p class="fine">영상 픽스처: lab/fixtures/videos/ (git 제외). 정수리: lab/fixtures/crown/. 결과: lab/results/</p>
     `;
     $("stage").insertAdjacentElement("afterend", panel);
-    window.__graftBaselineLoss = true;
-    const baselineInput = $("graft-lab-baseline");
-    const baselineLabel = $("graft-lab-baseline-label");
-    baselineInput.addEventListener("change", (e) => {
-      window.__graftBaselineLoss = e.target.checked;
-      baselineLabel.textContent = e.target.checked ? "켜짐" : "꺼짐";
-      stillCache = new Map();
-      baselineCache = new Map();
-      stripCache = new Map();
-      if (screen === "live" || screen === "prefetch") void startPrefetch();
-      updateButtons();
-      updateLab();
-    });
-    $("graft-lab-prefetch").addEventListener("change", (e) => {
-      window.__graftPrefetchMode = e.target.value;
-    });
-    $("graft-lab-delay").addEventListener("change", (e) => {
-      window.__graftDelaySync = e.target.checked;
-      if (!e.target.checked) delayed?.setDelay(0);
+    window.__graftTestMode = true;
+    $("graft-lab-testmode").addEventListener("change", (e) => {
+      window.__graftTestMode = e.target.checked;
+      $("graft-lab-testmode-label").textContent = e.target.checked ? "켜짐" : "꺼짐";
     });
     $("graft-lab-enhance").addEventListener("change", (e) => {
       window.__graftLabEnhance = e.target.checked;
     });
-    $("graft-lab-save-strips").addEventListener("click", () => { void downloadStrips(); });
+    $("graft-lab-save-strips").addEventListener("click", () => {
+      void saveLabStrips();
+    });
     labDebug = panel;
     updateLab();
     return panel;
   }
 
-  async function downloadStrips() {
-    for (const [a, row] of stripCache) {
-      const files = [
-        { name: `${a}_00_capture.jpg`, blob: row.capture },
-      ];
-      if (row.baselineBlobPromise) {
-        files.push({ name: `${a}_01_baseline.jpg`, blob: await row.baselineBlobPromise });
-      }
-      for (const g of GRAFT_LEVELS) {
-        if (row.levels[g]?.blob) {
-          files.push({ name: `${a}_${g}.jpg`, blob: row.levels[g].blob });
-        }
-      }
-      for (const file of files) {
-        const url = URL.createObjectURL(file.blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = file.name;
-        link.click();
-        URL.revokeObjectURL(url);
-        await new Promise((r) => setTimeout(r, 120));
-      }
+  function labFig(blob, caption) {
+    const fig = document.createElement("figure");
+    fig.className = "ref-lab-shot";
+    if (blob) {
+      const img = document.createElement("img");
+      img.src = URL.createObjectURL(blob);
+      fig.append(img);
+    } else {
+      const empty = document.createElement("div");
+      empty.className = "graft-lab-empty";
+      empty.textContent = "—";
+      fig.append(empty);
+    }
+    const cap = document.createElement("figcaption");
+    cap.textContent = caption;
+    fig.append(cap);
+    return fig;
+  }
+
+  async function saveLabStrips() {
+    const shots = [];
+    if (captureBlob) shots.push({ name: "01-capture.jpg", blob: captureBlob });
+    if (baselineFront?.blob) shots.push({ name: "02-baseline.jpg", blob: baselineFront.blob });
+    for (const g of GRAFT_LEVELS) {
+      const mask = guideCache.get(comboKeyFor(area, g));
+      if (mask?.blob) shots.push({ name: `03-mask-${area}-${g}.png`, blob: mask.blob });
+    }
+    for (const g of GRAFT_LEVELS) {
+      const fill = fillCache.get(comboKeyFor(area, g));
+      if (fill?.blob) shots.push({ name: `04-fill-${area}-${g}.jpg`, blob: fill.blob });
+    }
+    for (const shot of shots.slice(0, 5)) {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(shot.blob);
+      a.download = shot.name;
+      a.click();
+      URL.revokeObjectURL(a.href);
     }
   }
 
-  async function updateLab() {
+  function updateLab() {
     if (!isLab || !labDebug) return;
-    if (analysis) {
-      $("graft-lab-analysis").textContent = JSON.stringify({
-        ...analysis,
-        baselineLoss: baselineOn(),
-      }, null, 2);
+    const fillsMeta = {};
+    for (const [key, entry] of fillCache) {
+      fillsMeta[key] = {
+        status: entry.status,
+        ms: entry.meta?.ms ?? labTimings.fills[key] ?? null,
+        cost: entry.meta?.estimatedCostUsd ?? null,
+        density: entry.meta?.densityLabel ?? null,
+        refined: entry.meta?.refined,
+        fallback: entry.meta?.fallback,
+      };
     }
-    const thumbs = $("graft-lab-thumbs");
-    if (thumbs) {
-      thumbs.innerHTML = "";
-      for (const dir of SHOT_ORDER) {
-        if (!shots[dir]) continue;
-        const fig = document.createElement("figure");
-        fig.className = "ref-lab-shot";
-        const img = document.createElement("img");
-        img.src = shots[dir].thumbUrl;
-        fig.append(img);
-        const cap = document.createElement("figcaption");
-        cap.textContent = `${dir} yaw=${Number(shots[dir].yaw).toFixed(0)}° ${shots[dir].quality?.ok ? "ok" : "warn"}`;
-        fig.append(cap);
-        thumbs.append(fig);
+    const meta = {
+      testMode: testMode(),
+      baselineMode: baselineMode(),
+      fillMode: fillMode(),
+      area,
+      grafts,
+      captureExposeCm,
+      baselineExposeCm,
+      foreheadGainCm: Number.isFinite(captureExposeCm) && Number.isFinite(baselineExposeCm)
+        ? baselineExposeCm - captureExposeCm
+        : null,
+      timings: labTimings,
+      frontBaseline: baselineFront?.meta || null,
+      crownBaseline: baselineCrown?.meta || null,
+      fills: fillsMeta,
+    };
+    $("graft-lab-meta").textContent = JSON.stringify(meta, null, 2);
+    const strip = $("graft-lab-strip");
+    if (strip) {
+      strip.innerHTML = "";
+      strip.append(labFig(captureBlob, "원본"));
+      strip.append(labFig(baldMaskBlob, `탈모 마스크`));
+      strip.append(labFig(prefillBaselineBlob, `prefillBaseline\n${labTimings.prefillMs ?? "?"}ms`));
+      strip.append(labFig(
+        baselineFront?.blob,
+        `최종 기준선\n${baselineFront?.meta?.ms ?? labTimings.refineMs ?? "?"}ms · $${baselineFront?.meta?.estimatedCostUsd ?? 0}`,
+      ));
+      for (const g of GRAFT_LEVELS) {
+        const guide = guideCache.get(comboKeyFor(area, g));
+        strip.append(labFig(guide?.prefillBlob, `prefill ${g}`));
       }
-    }
-    const strips = $("graft-lab-strips");
-    if (strips) {
-      strips.innerHTML = "";
-      for (const a of GRAFT_AREAS) {
-        const row = stripCache.get(a);
-        if (!row) continue;
-        const wrap = document.createElement("div");
-        wrap.className = "graft-lab-strip-row";
-        const title = document.createElement("h3");
-        title.textContent = a;
-        wrap.append(title);
-        const line = document.createElement("div");
-        line.className = "graft-lab-strip";
-        const cells = [
-          { label: "캡처", blob: row.capture, cm2: null },
-        ];
-        if (row.baseline) {
-          cells.push({
-            label: "기준선",
-            blob: await (row.baselineBlobPromise || rgbaToJpegBlob(row.baseline.imageData)),
-            cm2: `비움 ${row.baseline.stats.clearedCm2.toFixed(2)}cm²`,
-          });
-        }
-        for (const g of GRAFT_LEVELS) {
-          const entry = row.levels[g];
-          if (!entry) continue;
-          cells.push({
-            label: `${g.toLocaleString("ko-KR")}모`,
-            blob: entry.blob,
-            cm2: entry.meta.stats
-              ? `채움 ${Number(entry.meta.stats.filledCm2 || 0).toFixed(2)}cm²`
-              : null,
-          });
-        }
-        for (const cell of cells) {
-          const fig = document.createElement("figure");
-          fig.className = "ref-lab-shot";
-          const img = document.createElement("img");
-          img.src = URL.createObjectURL(cell.blob);
-          fig.append(img);
-          const cap = document.createElement("figcaption");
-          cap.textContent = cell.cm2 ? `${cell.label}\n${cell.cm2}` : cell.label;
-          fig.append(cap);
-          line.append(fig);
-        }
-        wrap.append(line);
-        strips.append(wrap);
+      for (const g of GRAFT_LEVELS) {
+        const fill = fillCache.get(comboKeyFor(area, g));
+        const label = fill?.status === "ready"
+          ? `최종 ${g}\n${fill.meta?.ms ?? "?"}ms · $${fill.meta?.estimatedCostUsd ?? 0}`
+          : `최종 ${g}\n${fill?.status || "대기"}`;
+        strip.append(labFig(fill?.blob, label));
       }
     }
     const grid = $("graft-lab-grid");
     if (!grid) return;
     grid.innerHTML = "";
-    for (const [key, entry] of stillCache) {
-      const fig = document.createElement("figure");
-      fig.className = "ref-lab-candidate ref-lab-shot";
-      const img = document.createElement("img");
-      img.src = URL.createObjectURL(entry.blob);
-      fig.append(img);
-      const cap = document.createElement("figcaption");
-      cap.textContent = `${key}\n${entry.meta.model || ""} ${entry.meta.ms ?? ""}ms filled=${entry.meta.stats?.filledPixels ?? "?"}`;
-      fig.append(cap);
-      grid.append(fig);
-    }
   }
 
   function mountControls() {
@@ -974,29 +1177,15 @@ export function createGraftFlow({
       btn.type = "button";
       btn.setAttribute("data-graft-area", key);
       btn.innerHTML = `${labels[key]}<small>${hints[key]}</small>`;
-      btn.addEventListener("click", () => { void changeSelection({ nextArea: key, baseline: false }); });
+      btn.addEventListener("click", () => { void changeSelection({ nextArea: key }); });
       areaRow.append(btn);
-    }
-    if (isLab) {
-      const baselineBtn = document.createElement("button");
-      baselineBtn.type = "button";
-      baselineBtn.id = "graft-baseline-btn";
-      baselineBtn.className = "ghost";
-      baselineBtn.textContent = "기준선";
-      baselineBtn.hidden = true;
-      baselineBtn.addEventListener("click", () => {
-        void changeSelection({ nextArea: area, nextGrafts: grafts, baseline: true });
-      });
-      graftRow.append(baselineBtn);
     }
     for (const level of GRAFT_LEVELS) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.setAttribute("data-graft-level", String(level));
       btn.textContent = `${level.toLocaleString("ko-KR")}모`;
-      btn.addEventListener("click", () => {
-        void changeSelection({ nextGrafts: level, baseline: false });
-      });
+      btn.addEventListener("click", () => { void changeSelection({ nextGrafts: level }); });
       graftRow.append(btn);
     }
   }
@@ -1007,7 +1196,6 @@ export function createGraftFlow({
     $("billing-note").hidden = false;
     $("graft-disclaimer").hidden = false;
     if (screen === "idle") showIdleStage();
-    $("graft-shot-bar").hidden = true;
     $("preset-bar").hidden = true;
     updateButtons();
     if (isLab) ensureLab();
@@ -1017,14 +1205,10 @@ export function createGraftFlow({
     resetAll();
     $("preset-actions").hidden = true;
     $("preset-bar").hidden = true;
-    $("graft-shot-bar").hidden = true;
     $("status").hidden = true;
     $("billing-note").hidden = true;
     $("graft-disclaimer").hidden = true;
     $("graft-capture-layer").hidden = true;
-    $("graft-split").hidden = true;
-    $("stage").classList.remove("graft-split-on");
-    restoreOutputHome();
     if (labDebug) labDebug.hidden = true;
   }
 
@@ -1033,16 +1217,15 @@ export function createGraftFlow({
       area: area === "crown" ? "crown" : area === "mline" ? "mline" : "hairline",
       density: densityKeyForGrafts(grafts),
       combo: comboKeyFor(area, grafts),
-      sessionId: session?.sessionId || graftSessionId,
+      sessionId: session?.sessionId || tokenPayload?.sessionId,
     };
   }
 
   mountControls();
-  bindHoldOriginal();
-  $("connect").addEventListener("click", () => { if (isActive()) void startCapture(); });
+  bindHoldBaseline();
+  $("connect").addEventListener("click", () => { if (isActive()) void startFrontFlow(); });
   $("disconnect").addEventListener("click", () => { if (isActive()) resetAll(); });
-  $("graft-shutter")?.addEventListener("click", () => { if (isActive()) void takeShutter(); });
-  $("graft-results")?.addEventListener("click", () => { if (isActive()) void onResults(); });
+  $("graft-baseline-retry")?.addEventListener("click", () => { if (isActive()) void retryBaseline(); });
 
   return {
     activate,

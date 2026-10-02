@@ -9,6 +9,7 @@ import { IMAGE_HAIR_PROMPT, buildHairPrompt } from "../public/hairPrompt.js";
 
 const fakeSdk = `
 export const noopLogger = {debug(){}, info(){}, warn(){}, error(){}};
+export function createConsoleLogger(){ return {debug(){}, info(){}, warn(){}, error(){}}; }
 export const models = { realtime: (name) => ({name, width:1280, height:720}) };
 export function createDecartClient({apiKey}) {
   window.__clientKey = apiKey;
@@ -27,11 +28,14 @@ export function createDecartClient({apiKey}) {
     const remote=canvas.captureStream(30);
     const rt = {
       getConnectionState:()=> 'generating',
-      on:(event, callback)=> window.__events[event]=callback,
+      on:(event, callback)=>{
+        const list = window.__events[event] || (window.__events[event] = []);
+        list.push(callback);
+      },
       set:async(input)=>{if(window.__rejectSet)throw new Error('test set failure');window.__sets.push(input);},
       disconnect:()=>{window.__disconnects++;clearInterval(timer);remote.getTracks().forEach(t=>t.stop());},
     };
-    window.__emit=(event,data)=>window.__events[event]?.(data);
+    window.__emit=(event,data)=>{(window.__events[event]||[]).forEach((fn)=>fn(data));};
     options.onConnectionChange('generating');
     options.onRemoteStream(remote);
     return rt;
@@ -116,6 +120,16 @@ const faceMockInit = `
   window.__testGraftMeasure = async (source, { pose = "front" } = {}) => {
     const width = source.videoWidth || source.width || 320;
     const height = source.videoHeight || source.height || 480;
+    // Baseline remeasure uses HTMLImageElement; capture uses video or canvas.
+    const isBaselineImage = typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement;
+    let forceLowGain = false;
+    if (isBaselineImage) {
+      window.__testStillMeasureCount = (window.__testStillMeasureCount || 0) + 1;
+      if (window.__testBaselineGainFailOnce && window.__testStillMeasureCount === 1) {
+        forceLowGain = true;
+        window.__testBaselineGainFailOnce = false;
+      }
+    }
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
@@ -123,14 +137,16 @@ const faceMockInit = `
     ctx.fillStyle = "#c8a090";
     ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = "#2a1a12";
-    ctx.fillRect(0, 0, width, Math.floor(height * 0.28));
+    // Baseline image has higher hairline → more forehead expose for gain check
+    const hairFrac = (!isBaselineImage || forceLowGain) ? 0.28 : 0.08;
+    ctx.fillRect(0, 0, width, Math.floor(height * hairFrac));
     const imageData = ctx.getImageData(0, 0, width, height);
     const hairMask = new Uint8Array(width * height);
     const faceMask = new Uint8Array(width * height);
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
-        if (y < height * 0.28) hairMask[i] = 1;
+        if (y < height * hairFrac) hairMask[i] = 1;
         else if (y < height * 0.75) faceMask[i] = 1;
       }
     }
@@ -152,18 +168,25 @@ const faceMockInit = `
         hairMask, faceMask, frameCanvas: canvas, imageData,
       };
     }
+    const curveY = (!isBaselineImage || forceLowGain) ? height * 0.26 : height * 0.08;
     const curve = [];
     for (let i = 0; i < 24; i++) {
-      curve.push({ x: (i / 23) * (width - 1), y: height * 0.26 + Math.sin(i / 4) * 2 });
+      curve.push({ x: (i / 23) * (width - 1), y: curveY + Math.sin(i / 4) * 2 });
     }
     return {
       measure: {
         kind: "front", width, height,
-        pxPerCm: 12,
+        // Scale with image size so cm is comparable across capture vs baseline resolutions
+        pxPerCm: height / 40,
         browTopY: height * 0.4,
         hairlineCurve: curve,
-        templeLeft: { x: width * 0.2, y: height * 0.26 },
-        templeRight: { x: width * 0.8, y: height * 0.26 },
+        templeLeft: { x: width * 0.2, y: curveY },
+        templeRight: { x: width * 0.8, y: curveY },
+        earLeft: { x: width * 0.12, y: height * 0.48 },
+        earRight: { x: width * 0.88, y: height * 0.48 },
+        faceCenterX: width * 0.5,
+        faceHeightPx: height * 0.45,
+        foreheadExposeCm: (height * 0.4 - curveY) / (height / 40),
       },
       hairMask, faceMask, frameCanvas: canvas, imageData,
     };
@@ -190,7 +213,14 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   let lastDescribeImage = null;
   const previewJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 10, g: 200, b: 40 } } }).jpeg().toBuffer();
   const graftJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 40, g: 20, b: 10 } } }).jpeg().toBuffer();
+  const baselineJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 190, g: 160, b: 140 } } }).jpeg().toBuffer();
   let graftInpaintCalls = 0;
+  let graftFillCalls = 0;
+  let baselineCalls = 0;
+  let lastBaselinePose = null;
+  let lastBaselineHadMask = false;
+  let failBaselineOnce = false;
+  let failGraftFillRemaining = 0;
   const lastGraftPersonMeans = [];
   const app = await createApp({
     config,
@@ -212,6 +242,24 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
         return { buffer: previewJpeg, mediaType: "image/jpeg" };
       },
     },
+    baselineEditor: {
+      edit: async ({ pose, mask }) => {
+        baselineCalls++;
+        lastBaselinePose = pose;
+        lastBaselineHadMask = Boolean(mask);
+        if (failBaselineOnce) {
+          failBaselineOnce = false;
+          throw new Error("baseline boom");
+        }
+        return {
+          buffer: baselineJpeg,
+          mediaType: "image/jpeg",
+          model: "gemini-3-pro-image",
+          ms: 11,
+          estimatedCostUsd: 0.04,
+        };
+      },
+    },
     graftInpaint: {
       meta: { id: "gemini-3-pro-image", estimatedCostUsd: 0.04 },
       inpaint: async ({ person }) => {
@@ -226,6 +274,23 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
           ms: 5,
           estimatedCostUsd: 0.04,
           densityLabel: "medium",
+        };
+      },
+    },
+    graftFill: {
+      fill: async ({ density }) => {
+        graftFillCalls++;
+        if (failGraftFillRemaining > 0) {
+          failGraftFillRemaining -= 1;
+          throw new Error("fill boom");
+        }
+        return {
+          buffer: graftJpeg,
+          mediaType: "image/jpeg",
+          model: "gemini-3-pro-image",
+          ms: 7,
+          estimatedCostUsd: 0.04,
+          densityLabel: density <= 0.7 ? "sparse" : density <= 0.85 ? "medium" : "dense",
         };
       },
     },
@@ -377,26 +442,35 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(textInitial.prompt, buildHairPrompt(describeSpec, { withImage: false }));
   await page.locator("#ref-end").click();
 
-  // Preset (모수): 4-shot shutter → analyze/prefetch → split live → instant combo switch
+  // Preset (모수): countdown capture → (public: no /baseline) → single live stage
   await page.locator("#tab-preset").click();
   await expect(page.locator("#preset-actions")).toBeVisible();
   await expect(page.locator("#graft-disclaimer")).toBeVisible();
-  await expect(page.locator("#stage-label")).toContainText("정면·왼쪽·오른쪽·정수리");
+  await expect(page.locator("#stage-label")).toContainText("정면");
   await expect(page.getByText("따라하고 싶은 헤어 사진을 올려주세요")).toBeHidden();
+  assert.equal(await page.locator("#graft-split").count(), 0);
+  assert.equal(await page.getByText("현재 상태로 충분").count(), 0);
 
+  const baselineBeforePublic = baselineCalls;
   await page.locator("#connect").click();
   await expect(page.locator("#graft-capture-layer")).toBeVisible({ timeout: 10000 });
-  for (const dir of ["front", "left", "right", "crown"]) {
-    await expect(page.locator("#graft-shutter")).toBeEnabled({ timeout: 15000 });
-    await page.locator("#graft-shutter").click();
-    await expect(page.locator(`.graft-thumb[data-shot="${dir}"] img`)).toBeVisible({ timeout: 15000 });
-  }
-  await expect(page.locator("#graft-results")).toBeEnabled({ timeout: 5000 });
-  await page.locator("#graft-results").click();
-  await expect(page.locator("#graft-split")).toBeVisible({ timeout: 30000 });
-  await expect(page.locator("#save-result")).toBeEnabled({ timeout: 30000 });
-  await expect(page.locator("#graft-disclaimer")).toBeVisible();
-  assert.ok(graftInpaintCalls >= 1);
+  await expect(page.locator("#output")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#graft-hold-baseline")).toBeVisible();
+  await expect(page.locator("#graft-hold-baseline")).toHaveText("시술 전");
+  await expect(page.locator("#combo-label")).toBeVisible();
+  await expect(page.locator("#combo-label")).toHaveText("시술 전");
+  await page.waitForFunction(() => {
+    const v = document.getElementById("output");
+    return Boolean(v?.srcObject) && (v.readyState >= 2 || v.videoWidth > 0);
+  }, { timeout: 30000 });
+  await expect(page.locator("#save-result")).toBeEnabled({ timeout: 5000 });
+  assert.equal(baselineCalls, baselineBeforePublic, "/ should not call /baseline");
+  await expect.poll(() => graftFillCalls).toBeGreaterThanOrEqual(3);
+  const tracksAfterCapture = await page.evaluate(() => window.__graftLastCaptureTracks);
+  assert.ok(Array.isArray(tracksAfterCapture) && tracksAfterCapture.length > 0);
+  assert.ok(tracksAfterCapture.every((t) => t.readyState === "live"), JSON.stringify(tracksAfterCapture));
+  const liveTracks = await page.evaluate(() => (window.__camera?.getTracks?.() || []).map((t) => t.readyState));
+  assert.ok(liveTracks.every((s) => s === "live"), `lucy camera tracks ${JSON.stringify(liveTracks)}`);
 
   const graftInitial = await page.evaluate(() => ({
     prompt: window.__options.initialState.prompt.text,
@@ -406,18 +480,25 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(graftInitial.enhance, false);
   assert.equal(graftInitial.hasImage, true);
 
-  const callsBefore = graftInpaintCalls;
   await page.locator('#preset-bar [data-graft-level="3000"]').click();
   await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(0);
   const setPayload = await page.evaluate(() => window.__sets.at(-1));
   assert.equal(setPayload.enhance, false);
   assert.ok(setPayload.image);
-  // Cached or newly generated — either way set() must fire with image+prompt+enhance
   assert.ok(typeof setPayload.prompt === "string");
+  assert.ok(graftFillCalls >= 3);
+
+  const setsBeforeHold = await page.evaluate(() => window.__sets.length);
+  await page.locator("#graft-hold-baseline").dispatchEvent("pointerdown");
+  await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(setsBeforeHold);
+  const holdSet = await page.evaluate(() => window.__sets.at(-1));
+  assert.ok(holdSet.image);
+  await page.locator("#graft-hold-baseline").dispatchEvent("pointerup");
+  await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(setsBeforeHold + 1);
 
   await page.locator('#preset-bar [data-graft-area="crown"]').click();
-  await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(1);
-  assert.ok(graftInpaintCalls >= callsBefore);
+  await expect(page.locator("#graft-capture-layer")).toBeVisible({ timeout: 10000 });
+  await expect(page.locator("#output")).toBeVisible({ timeout: 30000 });
 
   await page.locator("#save-result").click();
   await expect(page.locator("#contact")).toBeVisible();
@@ -431,10 +512,7 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
 
   assert.equal(await page.locator("#ref-lab-debug").count(), 0);
   assert.equal(await page.locator("#graft-lab-debug").count(), 0);
-  assert.equal(await page.locator("#graft-lab-baseline").count(), 0);
-  assert.equal(await page.locator("#graft-baseline-btn").count(), 0);
-  const publicPersonMean = lastGraftPersonMeans.at(-1);
-  assert.ok(Number.isFinite(publicPersonMean));
+  assert.equal(await page.locator("#graft-lab-testmode").count(), 0);
   failPreview = false;
   const labPage = await context.newPage();
   await labPage.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
@@ -459,29 +537,69 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await expect(labPage.locator("#ref-lab-prompt")).toContainText("enhance=false");
   await expect(labPage.locator("#ref-lab-prompt")).toContainText(IMAGE_HAIR_PROMPT);
 
-  // /lab 모수: 가상 탈모 기본 켜짐 → inpaint person은 baselineFrame
+  // /lab 모수: refined → /baseline(with mask) once; forehead fail → prefill fallback (no retry)
   await labPage.locator("#ref-end").click();
   await labPage.locator("#tab-preset").click();
-  await expect(labPage.locator("#graft-lab-baseline")).toBeVisible();
-  await expect(labPage.locator("#graft-lab-baseline")).toBeChecked();
-  await expect(labPage.locator("#graft-lab-baseline-label")).toHaveText("켜짐");
-  const meansBeforeLab = lastGraftPersonMeans.length;
+  await expect(labPage.locator("#graft-lab-testmode")).toBeVisible();
+  await expect(labPage.locator("#graft-lab-testmode")).toBeChecked();
+  assert.equal(await labPage.locator("#graft-exp-a").count(), 0);
+  await labPage.evaluate(() => {
+    window.__testStillMeasureCount = 0;
+    window.__testBaselineGainFailOnce = true;
+  });
+  const baselineBeforeLab = baselineCalls;
+  const fillBeforeLab = graftFillCalls;
   await labPage.locator("#connect").click();
   await expect(labPage.locator("#graft-capture-layer")).toBeVisible({ timeout: 10000 });
-  for (const dir of ["front", "left", "right", "crown"]) {
-    await expect(labPage.locator("#graft-shutter")).toBeEnabled({ timeout: 15000 });
-    await labPage.locator("#graft-shutter").click();
-    await expect(labPage.locator(`.graft-thumb[data-shot="${dir}"] img`)).toBeVisible({ timeout: 15000 });
-  }
-  await labPage.locator("#graft-results").click();
   await expect(labPage.locator("#status")).toContainText("준비됨", { timeout: 30000 });
-  await expect(labPage.locator("#graft-baseline-btn")).toBeVisible({ timeout: 15000 });
-  const splitHidden = await labPage.locator("#graft-split").getAttribute("hidden");
-  assert.equal(splitHidden, null);
-  await expect.poll(() => lastGraftPersonMeans.length).toBeGreaterThan(meansBeforeLab);
-  const labPersonMean = lastGraftPersonMeans.at(-1);
-  // baseline clears dark hair to skin → brighter person frame than public path
-  assert.ok(labPersonMean > publicPersonMean, `baseline person ${labPersonMean} vs public ${publicPersonMean}`);
+  await expect.poll(() => baselineCalls).toBe(baselineBeforeLab + 1);
+  assert.equal(lastBaselinePose, "front");
+  assert.equal(lastBaselineHadMask, true);
+  await expect.poll(() => graftFillCalls).toBeGreaterThanOrEqual(fillBeforeLab + 3);
+  await expect(labPage.locator("#graft-lab-strip")).toBeVisible();
+  await expect(labPage.locator("#graft-lab-save-strips")).toBeVisible();
+  const labInitial = await labPage.evaluate(() => ({
+    hasImage: "image" in window.__options.initialState,
+    size: window.__options.initialState.image?.size || 0,
+    type: window.__options.initialState.image?.type || "",
+  }));
+  assert.equal(labInitial.hasImage, true);
+  assert.ok(labInitial.size > 0);
+  assert.equal(labInitial.type, "image/jpeg");
+  assert.equal(await labPage.locator("#graft-split").count(), 0);
+  assert.equal(await labPage.getByText("현재 상태로 충분").count(), 0);
+
+  const setsBeforeLabGraft = await labPage.evaluate(() => window.__sets.length);
+  await labPage.locator('#preset-bar [data-graft-level="1000"]').click();
+  await expect.poll(async () => labPage.evaluate(() => window.__sets.length)).toBeGreaterThan(setsBeforeLabGraft);
+  const labSet = await labPage.evaluate(() => window.__sets.at(-1));
+  assert.ok(labSet.image);
+
+  // ?baseline=prefill&fill=prefill → no Gemini baseline/fill calls
+  await labPage.close();
+  const prefillPage = await context.newPage();
+  await prefillPage.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
+  await prefillPage.goto(`${base}/lab?baseline=prefill&fill=prefill`);
+  await prefillPage.locator("#tab-preset").click();
+  const baselineBeforePrefill = baselineCalls;
+  const fillBeforePrefill = graftFillCalls;
+  await prefillPage.locator("#connect").click();
+  await expect(prefillPage.locator("#status")).toContainText("준비됨", { timeout: 45000 });
+  assert.equal(baselineCalls, baselineBeforePrefill, "prefill baseline mode skips Gemini");
+  assert.equal(graftFillCalls, fillBeforePrefill, "prefill fill mode skips Gemini");
+  await prefillPage.locator('#preset-bar [data-graft-level="3000"]').click();
+  await expect.poll(async () => prefillPage.evaluate(() => window.__sets.length)).toBeGreaterThan(0);
+  assert.equal(graftFillCalls, fillBeforePrefill);
+
+  // Gemini fill failure → still proceeds with prefillGuide (reuse page: disconnect + reconnect with fail flag)
+  failGraftFillRemaining = 6;
+  await prefillPage.locator("#disconnect").click();
+  await prefillPage.goto(`${base}/lab`);
+  await prefillPage.locator("#tab-preset").click();
+  await prefillPage.locator("#connect").click();
+  await expect(prefillPage.locator("#status")).toContainText("준비됨", { timeout: 45000 });
+  await prefillPage.locator('#preset-bar [data-graft-level="2000"]').click();
+  await expect.poll(async () => prefillPage.evaluate(() => window.__sets.length)).toBeGreaterThan(0);
 
   const nativePage = await context.newPage();
   await nativePage.goto(base);

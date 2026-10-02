@@ -1,6 +1,7 @@
 import {
   EYEBROW_INDICES,
   FACE_LANDMARKER_MODEL_PATH,
+  FACE_OVAL_RING,
   MEDIAPIPE_WASM_PATH,
   landmarksToPixels,
 } from "./faceMask.js";
@@ -23,9 +24,42 @@ export const SEG_FACE_SKIN = 3;
  * 병원 확인 전 임시값.
  */
 export const FOREHEAD_EXPOSE_MIN_CM = 2.5;
+/**
+ * Baseline must expose at least this many more cm of forehead than the capture.
+ * 병원 확인 전 임시값.
+ */
+export const BASELINE_FOREHEAD_GAIN_MIN_CM = 3.0;
 
 let landmarkerPromise = null;
 let segmenterPromise = null;
+/** Wall-clock ms until which measureFrame must not run MediaPipe (Lucy connect window). */
+let mediaPipeBlockedUntil = 0;
+
+/** Block MediaPipe inference until `Date.now() + ms` (extends if already blocked). */
+export function blockMediaPipe(ms = 3000) {
+  const until = Date.now() + Math.max(0, Number(ms) || 0);
+  mediaPipeBlockedUntil = Math.max(mediaPipeBlockedUntil, until);
+}
+
+export function unblockMediaPipe() {
+  mediaPipeBlockedUntil = 0;
+}
+
+export function isMediaPipeBlocked() {
+  return Date.now() < mediaPipeBlockedUntil;
+}
+
+/** Close FaceLandmarker + ImageSegmenter and drop cached promises. Safe to call repeatedly. */
+export async function closeMediaPipe() {
+  const lmPromise = landmarkerPromise;
+  const segPromise = segmenterPromise;
+  landmarkerPromise = null;
+  segmenterPromise = null;
+  const lm = lmPromise ? await lmPromise.catch(() => null) : null;
+  const seg = segPromise ? await segPromise.catch(() => null) : null;
+  try { lm?.close?.(); } catch { /* ignore */ }
+  try { seg?.close?.(); } catch { /* ignore */ }
+}
 
 export function median(values) {
   if (!values.length) return NaN;
@@ -88,6 +122,34 @@ export function assertForeheadExposed(measure) {
     throw error;
   }
   return cm;
+}
+
+/**
+ * Baseline (Gemini) must show substantially more bare forehead than the capture.
+ * Returns gain in cm, or throws baseline-forehead-fail.
+ */
+export function assertBaselineForeheadGain({
+  captureCm,
+  baselineCm,
+  minGainCm = BASELINE_FOREHEAD_GAIN_MIN_CM,
+} = {}) {
+  if (!(Number.isFinite(captureCm) && Number.isFinite(baselineCm))) {
+    const error = new Error("시술 전 이미지를 만들지 못했어요");
+    error.code = "baseline-forehead-fail";
+    error.captureCm = captureCm;
+    error.baselineCm = baselineCm;
+    throw error;
+  }
+  const gain = baselineCm - captureCm;
+  if (!(gain >= minGainCm)) {
+    const error = new Error("시술 전 이미지를 만들지 못했어요");
+    error.code = "baseline-forehead-fail";
+    error.captureCm = captureCm;
+    error.baselineCm = baselineCm;
+    error.gainCm = gain;
+    throw error;
+  }
+  return gain;
 }
 
 /**
@@ -220,12 +282,25 @@ export function categoryMaskFromLabels(labels, width, height, category) {
   return out;
 }
 
+export function earsFromOvalPoints(points) {
+  let left = null;
+  let right = null;
+  for (const i of FACE_OVAL_RING) {
+    const p = points[i];
+    if (!p) continue;
+    if (!left || p.x < left.x) left = p;
+    if (!right || p.x > right.x) right = p;
+  }
+  return { earLeft: left, earRight: right };
+}
+
 export function measureFrontFromInputs({
   landmarks,
   width,
   height,
   hairMask,
   faceMask,
+  skipForeheadCheck = false,
 }) {
   if (!landmarks || landmarks.length < 478) {
     const error = new Error("얼굴이 정면으로 보이게 해주세요");
@@ -252,6 +327,8 @@ export function measureFrontFromInputs({
     throw error;
   }
   const temples = templesFromCurveAndLandmarks(hairlineCurve, points);
+  const ears = earsFromOvalPoints(points);
+  const chinY = points[152]?.y ?? height * 0.85;
   const measure = {
     kind: "front",
     width,
@@ -261,12 +338,17 @@ export function measureFrontFromInputs({
     hairlineCurve,
     templeLeft: temples.templeLeft,
     templeRight: temples.templeRight,
+    earLeft: ears.earLeft,
+    earRight: ears.earRight,
+    faceCenterX: ((temples.templeLeft?.x ?? 0) + (temples.templeRight?.x ?? width)) / 2,
+    faceHeightPx: Math.max(1, chinY - browTopY),
   };
-  const foreheadExposeCmValue = assertForeheadExposed(measure);
-  return {
-    ...measure,
-    foreheadExposeCm: foreheadExposeCmValue,
-  };
+  if (!skipForeheadCheck) {
+    measure.foreheadExposeCm = assertForeheadExposed(measure);
+  } else {
+    measure.foreheadExposeCm = foreheadExposeCm(measure);
+  }
+  return measure;
 }
 
 export function measureCrownFromInputs({ hairMask, faceMask, width, height, rgba }) {
@@ -393,10 +475,15 @@ async function segmentLabels(canvas) {
   });
 }
 
-export async function measureFrame(source, { pose = "front" } = {}) {
+export async function measureFrame(source, { pose = "front", skipForeheadCheck = false } = {}) {
   // Browser/unit test hook: skip MediaPipe wasm when a deterministic stub is installed.
   if (typeof globalThis.__testGraftMeasure === "function") {
-    return globalThis.__testGraftMeasure(source, { pose });
+    return globalThis.__testGraftMeasure(source, { pose, skipForeheadCheck });
+  }
+  if (isMediaPipeBlocked()) {
+    const error = new Error("MediaPipe is paused during Lucy connect");
+    error.code = "mediapipe-blocked";
+    throw error;
   }
   const { canvas, width, height, imageData } = canvasFromVideoOrImage(source);
   const seg = await segmentLabels(canvas);
@@ -434,6 +521,7 @@ export async function measureFrame(source, { pose = "front" } = {}) {
       height,
       hairMask,
       faceMask,
+      skipForeheadCheck,
     }),
     hairMask,
     faceMask,
@@ -458,6 +546,7 @@ export async function measureWithStabilization(source, {
   pose = "front",
   samples = 5,
   intervalMs = 100,
+  skipForeheadCheck = false,
 } = {}) {
   const useTest = typeof globalThis.__testGraftMeasure === "function";
   const count = useTest ? 1 : samples;
@@ -468,7 +557,7 @@ export async function measureWithStabilization(source, {
   let lastCanvas = null;
   let lastImage = null;
   for (let i = 0; i < count; i++) {
-    const result = await measureFrame(source, { pose });
+    const result = await measureFrame(source, { pose, skipForeheadCheck });
     collected.push(result.measure);
     lastHair = result.hairMask;
     lastFace = result.faceMask;

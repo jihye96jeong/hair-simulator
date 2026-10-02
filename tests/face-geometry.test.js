@@ -11,6 +11,8 @@ import {
   median,
   medianMeasure,
   pxPerCmFromIrises,
+  assertBaselineForeheadGain,
+  BASELINE_FOREHEAD_GAIN_MIN_CM,
   LEFT_IRIS,
   RIGHT_IRIS,
 } from "../public/faceGeometry.js";
@@ -152,4 +154,33 @@ test("medianMeasure stabilizes front samples", () => {
   }));
   const mid = medianMeasure(jittered);
   assert.equal(mid.browTopY, base.browTopY);
+});
+
+test("assertBaselineForeheadGain requires ≥ 3.0cm gain", () => {
+  assert.equal(BASELINE_FOREHEAD_GAIN_MIN_CM, 3.0);
+  assert.equal(assertBaselineForeheadGain({ captureCm: 1.0, baselineCm: 4.5 }), 3.5);
+  assert.throws(
+    () => assertBaselineForeheadGain({ captureCm: 2.0, baselineCm: 4.5 }),
+    (err) => err.code === "baseline-forehead-fail" && /시술 전/.test(err.message),
+  );
+  assert.throws(
+    () => assertBaselineForeheadGain({ captureCm: NaN, baselineCm: 5 }),
+    (err) => err.code === "baseline-forehead-fail",
+  );
+});
+
+test("MediaPipe block gate and closeMediaPipe are safe without models", async () => {
+  const {
+    blockMediaPipe,
+    closeMediaPipe,
+    isMediaPipeBlocked,
+    unblockMediaPipe,
+  } = await import("../public/faceGeometry.js");
+  unblockMediaPipe();
+  assert.equal(isMediaPipeBlocked(), false);
+  blockMediaPipe(50);
+  assert.equal(isMediaPipeBlocked(), true);
+  await closeMediaPipe();
+  unblockMediaPipe();
+  assert.equal(isMediaPipeBlocked(), false);
 });

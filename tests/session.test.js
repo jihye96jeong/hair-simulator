@@ -14,7 +14,7 @@ function fixture() {
   const sets = [];
   const stream = { getTracks: () => [{ stop: () => stops++ }] };
   const rt = { disconnect: () => disconnects++, getConnectionState: () => "generating", on: (event, callback) => callbacks.set(event, callback), set: async (value) => sets.push(value) };
-  const session = new RealtimeSession({ mode: "ref", anchor: "on", combo: "mline_1k", now: () => wall,
+  const session = new RealtimeSession({ mode: "graft", anchor: "on", combo: "mline_1000", now: () => wall,
     report: (value) => reports.push(value), logger: { info: (...args) => logs.push(args), error() {} },
     timers: { setTimeout: (fn, ms) => { timeouts.push({ fn, ms }); return 1; }, setInterval: () => 2, clearTimeout() {}, clearInterval() {} },
   });
@@ -55,7 +55,7 @@ test("a reconnect tick reset preserves total usage; a new session starts at zero
   await f.session.start(f.stream, token, async () => f.rt, {});
   f.callbacks.get("generationTick")({ seconds: 70 });
   f.callbacks.get("connectionChange")("reconnecting");
-  assert.equal(await f.session.select("hairline_1k", {}), false);
+  assert.equal(await f.session.select("hairline_1000", {}), false);
   f.callbacks.get("connectionChange")("generating");
   f.callbacks.get("generationTick")({ seconds: 0 });
   f.callbacks.get("generationTick")({ seconds: 50 });
@@ -69,13 +69,15 @@ test("a reconnect tick reset preserves total usage; a new session starts at zero
 test("switches share the connection; capture closes it immediately", async () => {
   const f = fixture();
   await f.session.start(f.stream, token, async () => f.rt, {});
-  assert.equal(await f.session.select("hairline_1k", { prompt: "full state", enhance: true, image: new Blob() }), true);
+  assert.equal(await f.session.select("hairline_1000", { prompt: "full state", enhance: true, image: new Blob() }), true);
   assert.equal(f.session.switches, 1);
   assert.equal(f.counts().disconnects, 0);
   f.session.stop("capture", true);
   assert.equal(f.counts().disconnects, 1);
   assert.equal(f.reports[0].captured, true);
-  assert.equal(f.reports[0].combo, "hairline_1k");
+  assert.equal(f.reports[0].combo, "hairline_1000");
+  assert.equal(f.reports[0].mode, "graft");
+  assert.ok(f.logs.some(([event]) => event === "session-end"));
 });
 test("rapid select drains to the latest preset without reconnect", async () => {
   const f = fixture();
@@ -90,11 +92,11 @@ test("rapid select drains to the latest preset without reconnect", async () => {
     active--;
   };
   await f.session.start(f.stream, token, async () => f.rt, {});
-  const first = f.session.select("hairline_1k", { prompt: "1k", enhance: true });
-  const second = f.session.select("hairline_2k", { prompt: "2k", enhance: true });
+  const first = f.session.select("hairline_1000", { prompt: "1k", enhance: true });
+  const second = f.session.select("hairline_2000", { prompt: "2k", enhance: true });
   assert.equal(await first, true);
   assert.equal(await second, true);
-  assert.equal(f.session.combo, "hairline_2k");
+  assert.equal(f.session.combo, "hairline_2000");
   assert.deepEqual(f.sets.map((item) => item.prompt), ["1k", "2k"]);
   assert.ok(f.session.switches >= 1);
   assert.equal(active, 0);
@@ -152,4 +154,26 @@ test("late SDK connect result is disposed after stop", async () => {
   resolveConnect(f.rt);
   await promise;
   assert.deepEqual(f.counts(), { disconnects: 1, stops: 1 });
+});
+test("connect failure records connect-failed reason on session-end", async () => {
+  const f = fixture();
+  await f.session.start(f.stream, token, async () => {
+    const err = new Error("WebSocket closed: 1008 policy_violation");
+    err.connectFailed = true;
+    throw err;
+  }, {});
+  assert.equal(f.reports.length, 1);
+  assert.match(f.reports[0].reason, /^connect-failed: WebSocket closed: 1008 policy_violation$/);
+});
+test("insufficient credits connect failure uses credits user message", async () => {
+  const errors = [];
+  const f = fixture();
+  f.session.onError = (message) => errors.push(message);
+  await f.session.start(f.stream, token, async () => {
+    const err = new Error("Insufficient credits");
+    err.connectFailed = true;
+    throw err;
+  }, {});
+  assert.equal(f.reports[0].reason, "connect-failed: Insufficient credits");
+  assert.equal(errors[0], "지금은 체험을 이용할 수 없어요. 잠시 후 다시 시도해 주세요.");
 });

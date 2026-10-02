@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import {
   buildGraftMask,
   assertProtectedRegionUnmasked,
-  assertProtectedRegionUnchanged,
+  assertHairlineMaskWidth,
+  MASK_FACE_WIDTH_MIN_RATIO,
   featherMask,
+  buildFillMask,
 } from "../public/graftGuide.js";
-import { buildBaselineLoss } from "../public/baselineLoss.js";
 import { categoryMaskFromLabels, measureFrontFromInputs, measureCrownFromInputs } from "../public/faceGeometry.js";
-import { BASELINE } from "../public/graftRules.js";
 
-function frontFixture() {
+function frontBaselineFixture() {
   const width = 96;
   const height = 120;
   const labels = new Uint8Array(width * height);
@@ -19,34 +19,45 @@ function frontFixture() {
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
       const o = i * 4;
-      // High hairline so forehead expose ≥ 2.5cm and baseline can recede.
-      if (y < 18) {
+      const side = x < 14 || x > 81;
+      const highHair = side && y < 70;
+      if (highHair) {
         labels[i] = 1;
-        rgba[o] = 30; rgba[o + 1] = 20; rgba[o + 2] = 15; rgba[o + 3] = 255;
+        rgba[o] = 30; rgba[o + 1] = 20; rgba[o + 2] = 14; rgba[o + 3] = 255;
+      } else if (y < 18) {
+        labels[i] = 3;
+        rgba[o] = 210; rgba[o + 1] = 180; rgba[o + 2] = 160; rgba[o + 3] = 255;
       } else {
         labels[i] = 3;
         rgba[o] = 200; rgba[o + 1] = 170; rgba[o + 2] = 150; rgba[o + 3] = 255;
       }
     }
   }
+  for (let y = 0; y < 12; y++) {
+    for (let x = 20; x < 76; x++) {
+      const i = y * width + x;
+      labels[i] = 1;
+      const o = i * 4;
+      rgba[o] = 35; rgba[o + 1] = 24; rgba[o + 2] = 16; rgba[o + 3] = 255;
+    }
+  }
   const landmarks = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
   for (const i of [70, 105, 300, 334]) landmarks[i] = { x: 0.5, y: 0.42, z: 0 };
-  for (const i of [33, 133, 263, 362]) landmarks[i] = { x: 0.5, y: 0.48, z: 0 };
-  landmarks[54] = { x: 0.2, y: 0.2, z: 0 };
-  landmarks[284] = { x: 0.8, y: 0.2, z: 0 };
-  landmarks[468] = { x: 0.38, y: 0.48, z: 0 };
-  landmarks[469] = { x: 0.44, y: 0.48, z: 0 };
-  landmarks[470] = { x: 0.41, y: 0.45, z: 0 };
-  landmarks[471] = { x: 0.41, y: 0.51, z: 0 };
-  landmarks[472] = { x: 0.41, y: 0.48, z: 0 };
-  landmarks[473] = { x: 0.56, y: 0.48, z: 0 };
-  landmarks[474] = { x: 0.62, y: 0.48, z: 0 };
-  landmarks[475] = { x: 0.59, y: 0.45, z: 0 };
-  landmarks[476] = { x: 0.59, y: 0.51, z: 0 };
-  landmarks[477] = { x: 0.59, y: 0.48, z: 0 };
+  landmarks[54] = { x: 0.22, y: 0.18, z: 0 };
+  landmarks[284] = { x: 0.78, y: 0.18, z: 0 };
+  for (const [i, x] of [[468, 0.38], [469, 0.44], [470, 0.41], [471, 0.41], [472, 0.41]]) {
+    landmarks[i] = { x, y: 0.48, z: 0 };
+  }
+  landmarks[470].y = 0.45; landmarks[471].y = 0.51;
+  for (const [i, x] of [[473, 0.56], [474, 0.62], [475, 0.59], [476, 0.59], [477, 0.59]]) {
+    landmarks[i] = { x, y: 0.48, z: 0 };
+  }
+  landmarks[475].y = 0.45; landmarks[476].y = 0.51;
   const hairMask = categoryMaskFromLabels(labels, width, height, 1);
   const faceMask = categoryMaskFromLabels(labels, width, height, 3);
-  const measure = measureFrontFromInputs({ landmarks, width, height, hairMask, faceMask });
+  const measure = measureFrontFromInputs({
+    landmarks, width, height, hairMask, faceMask, skipForeheadCheck: true,
+  });
   return {
     measure,
     hairMask,
@@ -55,63 +66,50 @@ function frontFixture() {
   };
 }
 
-test("buildGraftMask is deterministic, feathered, and clears brow protect zone", async () => {
-  const fixture = frontFixture();
+test("buildGraftMask is deterministic mask-only and protects brow", async () => {
+  const fixture = frontBaselineFixture();
   const a = await buildGraftMask({ ...fixture, area: "hairline", grafts: 2000 });
   const b = await buildGraftMask({ ...fixture, area: "hairline", grafts: 2000 });
   assert.equal(a.stats.hash, b.stats.hash);
   assert.ok(a.stats.featherPx > 0);
+  assert.equal(a.mask.type, "image/png");
   assert.ok(assertProtectedRegionUnmasked(
     a.fillMask,
     fixture.measure.width,
     fixture.measure.height,
     fixture.measure.browTopY,
   ));
-  assert.ok([...a.fillMask].some((v) => v > 0.05 && v < 0.95));
 });
 
-test("mask filled pixels increase with graft level", async () => {
-  const fixture = frontFixture();
-  const g1 = await buildGraftMask({ ...fixture, area: "hairline", grafts: 1000 });
-  const g2 = await buildGraftMask({ ...fixture, area: "hairline", grafts: 2000 });
-  const g3 = await buildGraftMask({ ...fixture, area: "hairline", grafts: 3000 });
-  assert.ok(g1.stats.filledPixels < g2.stats.filledPixels);
-  assert.ok(g2.stats.filledPixels < g3.stats.filledPixels);
-
-  const m1 = await buildGraftMask({ ...fixture, area: "mline", grafts: 1000 });
-  const m3 = await buildGraftMask({ ...fixture, area: "mline", grafts: 3000 });
-  assert.ok(m1.stats.filledPixels < m3.stats.filledPixels);
-});
-
-test("baseline fill pixels grow 1000→2000→3000 and 3000 covers ≥90% of void", async () => {
-  const fixture = frontFixture();
+test("mask filled pixels increase 1000 → 2000 → 3000", async () => {
+  const fixture = frontBaselineFixture();
   for (const area of ["hairline", "mline"]) {
-    const baseline = buildBaselineLoss({ ...fixture, area });
-    assert.ok(baseline.stats.clearedPixels > 20, area);
-    assert.ok(assertProtectedRegionUnchanged(
-      fixture.imageData.data,
-      baseline.imageData.data,
-      fixture.measure.width,
-      fixture.measure.height,
-      fixture.measure.browTopY,
-    ), `${area} protect`);
-
-    const g1 = await buildGraftMask({ ...fixture, area, grafts: 1000, baselineLoss: baseline });
-    const g2 = await buildGraftMask({ ...fixture, area, grafts: 2000, baselineLoss: baseline });
-    const g3 = await buildGraftMask({ ...fixture, area, grafts: 3000, baselineLoss: baseline });
+    const g1 = await buildGraftMask({ ...fixture, area, grafts: 1000 });
+    const g2 = await buildGraftMask({ ...fixture, area, grafts: 2000 });
+    const g3 = await buildGraftMask({ ...fixture, area, grafts: 3000 });
     assert.ok(g1.stats.filledPixels < g2.stats.filledPixels, `${area} 1k<2k`);
     assert.ok(g2.stats.filledPixels < g3.stats.filledPixels, `${area} 2k<3k`);
-    assert.ok(g3.stats.fillRatioOfVoid >= 0.9, `${area} 3k covers void (${g3.stats.fillRatioOfVoid})`);
-    assert.ok(assertProtectedRegionUnmasked(
-      g3.fillMask,
-      fixture.measure.width,
-      fixture.measure.height,
-      fixture.measure.browTopY,
-    ));
   }
 });
 
-test("crown mask fills more at higher grafts", async () => {
+test("hairline mask width must be ≥ 60% of face width", () => {
+  const fixture = frontBaselineFixture();
+  const hard = buildFillMask({ area: "hairline", measure: fixture.measure, sizeCm: 1.8 });
+  assertHairlineMaskWidth({ fillMask: hard, measure: fixture.measure });
+
+  const narrow = new Float32Array(fixture.measure.width * fixture.measure.height);
+  const mid = Math.floor(fixture.measure.width / 2);
+  for (let y = 10; y < 30; y++) {
+    for (let x = mid - 2; x <= mid + 2; x++) narrow[y * fixture.measure.width + x] = 1;
+  }
+  assert.throws(
+    () => assertHairlineMaskWidth({ fillMask: narrow, measure: fixture.measure }),
+    (err) => err.code === "mask-width-fail" && /정면/.test(err.message),
+  );
+  assert.equal(MASK_FACE_WIDTH_MIN_RATIO, 0.6);
+});
+
+test("crown fill grows with graft level", async () => {
   const width = 64;
   const height = 64;
   const hairMask = new Uint8Array(width * height);
@@ -128,26 +126,16 @@ test("crown mask fills more at higher grafts", async () => {
       }
     }
   }
+  for (let y = 20; y < 45; y++) {
+    for (let x of [2, 3, 60, 61]) {
+      hairMask[y * width + x] = 1;
+      rgba[(y * width + x) * 4] = 25;
+    }
+  }
   const measure = measureCrownFromInputs({ hairMask, faceMask, width, height, rgba });
-  const imageData = { width, height, data: rgba };
-  const c1 = await buildGraftMask({ imageData, hairMask, measure, area: "crown", grafts: 1000 });
-  const c3 = await buildGraftMask({ imageData, hairMask, measure, area: "crown", grafts: 3000 });
+  const c1 = await buildGraftMask({ measure, area: "crown", grafts: 1000 });
+  const c3 = await buildGraftMask({ measure, area: "crown", grafts: 3000 });
   assert.ok(c1.stats.filledPixels < c3.stats.filledPixels);
-
-  const baseline = buildBaselineLoss({
-    area: "crown",
-    measure,
-    imageData,
-    hairMask,
-    faceMask,
-  });
-  assert.equal(baseline.geometry.radiusCm, BASELINE.crown.radiusCm);
-  const b1 = await buildGraftMask({ imageData, hairMask, measure, area: "crown", grafts: 1000, baselineLoss: baseline });
-  const b2 = await buildGraftMask({ imageData, hairMask, measure, area: "crown", grafts: 2000, baselineLoss: baseline });
-  const b3 = await buildGraftMask({ imageData, hairMask, measure, area: "crown", grafts: 3000, baselineLoss: baseline });
-  assert.ok(b1.stats.filledPixels < b2.stats.filledPixels);
-  assert.ok(b2.stats.filledPixels < b3.stats.filledPixels);
-  assert.ok(b3.stats.fillRatioOfVoid >= 0.9, `crown 3k ${b3.stats.fillRatioOfVoid}`);
 });
 
 test("featherMask softens hard edges", () => {

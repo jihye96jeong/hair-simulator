@@ -36,7 +36,7 @@
     <p id="error" class="notice error" role="alert" hidden></p>
 
     <div class="stage" id="stage">
-      <!-- 모수: 4방향 셔터 촬영 -->
+      <!-- 모수: 카운트다운 촬영 -->
       <div id="graft-capture-layer" class="ref-layer ref-capture-layer" hidden>
         <video id="graft-local-video" autoplay playsinline muted></video>
         <div id="graft-guide-front" class="selfie-guide" aria-hidden="true"></div>
@@ -48,19 +48,13 @@
         <p id="graft-countdown" class="ref-countdown" hidden>3</p>
       </div>
 
-      <!-- 모수 분할: 왼쪽/위 = 현재(원본). Lucy 영상은 #output -->
-      <div id="graft-split" class="graft-split" hidden>
-        <div class="graft-pane graft-pane-original">
-          <span class="graft-pane-label">현재</span>
-          <video id="graft-live-original" autoplay playsinline muted></video>
-        </div>
-        <div class="graft-pane graft-pane-sim">
-          <span class="graft-pane-label" id="graft-sim-label">시뮬레이션</span>
-        </div>
-      </div>
       <video id="output" autoplay playsinline muted hidden></video>
       <img id="captured-image" class="result" alt="" hidden>
-      <button type="button" id="graft-hold-original" class="graft-hold-original is-hidden">원래대로</button>
+      <button type="button" id="graft-hold-baseline" class="graft-hold-original is-hidden">시술 전</button>
+      <div id="graft-baseline-banner" class="ref-stage-banner" hidden>
+        <p id="graft-baseline-message">시술 전 이미지를 만들지 못했어요</p>
+        <button type="button" id="graft-baseline-retry">다시 시도</button>
+      </div>
 
       <!-- 레퍼런스: 대기 -->
       <div id="ref-layer-idle" class="ref-layer">
@@ -125,27 +119,15 @@
       </div>
     </div>
 
-    <!-- 모수: 4장 썸네일 · 셔터 · 결과 보기 -->
-    <div id="graft-shot-bar" class="graft-shot-bar" hidden>
-      <div id="graft-thumbs" class="graft-thumbs" role="list"></div>
-      <div class="actions graft-shot-actions">
-        <button type="button" id="graft-shutter">셔터</button>
-        <button type="button" id="graft-results" disabled>결과 보기</button>
-        <button type="button" id="graft-retake-cancel" class="ghost" hidden>촬영 취소</button>
-      </div>
-    </div>
-
     <!-- 모수: 부위 · 모량 (라이브에서만) -->
     <div id="preset-bar" class="preset-bar" hidden>
       <div class="preset-row area-buttons" data-areas role="group" aria-label="부위"></div>
       <div class="preset-row density combo-buttons" data-combos role="group" aria-label="모량"></div>
-      <button type="button" id="graft-original-btn" class="ghost" hidden>원래대로</button>
     </div>
 
     <div id="preset-actions" class="actions" hidden>
       <button type="button" id="connect">촬영 시작</button>
       <button type="button" id="disconnect" disabled>끊기</button>
-      <button type="button" id="graft-capture" disabled hidden>캡처</button>
     </div>
 
     <p id="graft-disclaimer" class="fine graft-disclaimer" hidden>참고용 시뮬레이션이며 실제 시술 결과와 다를 수 있습니다.</p>

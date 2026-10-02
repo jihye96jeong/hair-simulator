@@ -166,8 +166,16 @@ button:focus-visible,
 }
 .graft-lab-strip {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
   gap: 6px;
+}
+.graft-lab-empty {
+  aspect-ratio: 3 / 4;
+  display: grid;
+  place-items: center;
+  background: #1a1d24;
+  color: #6b7280;
+  font-size: 18px;
 }
 #graft-lab-save-strips {
   justify-self: start;

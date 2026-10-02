@@ -1,6 +1,12 @@
 import { REFERENCE_ENHANCE } from "./hairPrompt.js";
 import { CAP_SECONDS } from "./shared.js";
 
+export function isInsufficientCreditsMessage(message) {
+  return /insufficient[_\s-]?credits/i.test(String(message || ""));
+}
+
+export const CREDITS_USER_MESSAGE = "지금은 체험을 이용할 수 없어요. 잠시 후 다시 시도해 주세요.";
+
 /**
  * Decart lucy-2.5 realtime session lifecycle.
  * Preset and reference updates use rt.set() on the same connection (no reconnect).
@@ -42,6 +48,10 @@ export class RealtimeSession {
 
   async start(stream, tokenRequest, connect, options) {
     this.stream = stream;
+    this.initialImageBytes = options?.initialState?.image?.size
+      ?? options?.initialState?.image?.byteLength
+      ?? 0;
+    this.lastSetAt = null;
     try {
       const result = await tokenRequest();
       this.sessionId = result.sessionId;
@@ -59,18 +69,48 @@ export class RealtimeSession {
         },
         onConnectionChange: (state) => this.connectionChange(state),
       }, result.token);
-      if (this.stopped) { rt.disconnect(); return; }
       this.rt = rt;
+      if (this.stopped) { rt.disconnect(); return; }
       rt.on("connectionChange", (state) => this.connectionChange(state));
       rt.on("generationTick", ({ seconds }) => this.tick(seconds));
       rt.on("generationEnded", ({ seconds }) => this.tick(seconds));
-      rt.on("sessionEnded", () => this.stop(this.billedSeconds >= CAP_SECONDS ? "cap" : "disconnected"));
-      rt.on("error", () => { if (!this.stopped) { this.onError("실시간 연결에 문제가 생겼어요. 다시 시도해 주세요."); this.stop("error"); } });
+      rt.on("sessionEnded", (payload) => {
+        const endedReason = payload?.reason || "";
+        const reason = this.billedSeconds >= CAP_SECONDS
+          ? "cap"
+          : (endedReason ? `disconnected:${endedReason}` : "disconnected");
+        this.stop(reason);
+      });
+      rt.on("error", (err) => {
+        if (!this.stopped) {
+          this.onError("실시간 연결에 문제가 생겼어요. 다시 시도해 주세요.");
+          this.stop(err?.code ? `error:${err.code}` : "error");
+        }
+      });
       this.connectionChange(rt.getConnectionState());
     } catch (error) {
-      if (this.stopped) return;
+      if (this.stopped) {
+        if (error?.connectFailed && this.summary && /^disconnected/.test(this.summary.reason || "")) {
+          const reason = `connect-failed: ${error.message || ""}`.slice(0, 300);
+          this.summary.reason = reason;
+          this.logger.info("session-end", this.summary);
+        }
+        return;
+      }
+      const detail = error?.message || "";
+      if (error?.connectFailed || /^connect-failed:/i.test(detail)) {
+        const reason = detail.startsWith("connect-failed:") ? detail : `connect-failed: ${detail}`;
+        this.logger.info(`connect-failed message=${detail}`);
+        this.stop(reason.slice(0, 300));
+        this.onError(
+          isInsufficientCreditsMessage(detail)
+            ? CREDITS_USER_MESSAGE
+            : (error?.publicMessage || "연결하지 못했어요. 카메라와 네트워크를 확인해 주세요."),
+        );
+        return;
+      }
+      this.stop(detail ? `error: ${detail}`.slice(0, 300) : "error");
       this.onError(error?.publicMessage || "연결하지 못했어요. 카메라와 네트워크를 확인해 주세요.");
-      this.stop("error");
     }
   }
 
@@ -80,7 +120,8 @@ export class RealtimeSession {
     if (this.stopped) return;
     this.state = state;
     this.onState(state);
-    if (state === "disconnected") this.stop("disconnected");
+    // During await connect(), SDK may emit disconnected before the promise rejects.
+    if (state === "disconnected" && this.rt) this.stop("disconnected");
   }
 
   tick(seconds) {
@@ -112,6 +153,7 @@ export class RealtimeSession {
           this.desired = null;
           if (!next.force && next.key === this.combo) continue;
           await this.rt.set(next.state);
+          this.lastSetAt = this.now();
           if (this.stopped) return false;
           if (this.desired) continue;
           this.combo = next.key;

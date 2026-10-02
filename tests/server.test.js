@@ -47,7 +47,9 @@ async function fixture(t, options = {}) {
     store: options.store || { saveLead: async (lead, id) => { leads.push({ lead, id }); return { imageFileId: "private-file" }; } },
     hairVision: options.hairVision === undefined ? createPassVision() : options.hairVision,
     hairEditor: options.hairEditor,
+    baselineEditor: options.baselineEditor,
     graftInpaint: options.graftInpaint,
+    graftFill: options.graftFill,
   });
   const server = await new Promise((resolve, reject) => { const s = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve(s)); s.on("error", reject); });
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -126,13 +128,21 @@ test("server enforces both consents, phone, region and WebP; valid lead saved on
 });
 test("crown captures preserve area and density for all three densities", async (t) => {
   const f = await fixture(t);
-  for (const density of ["1k", "2k", "3k"]) {
+  const pairs = [
+    { density: "1k", combo: "crown_1000" },
+    { density: "2k", combo: "crown_2000" },
+    { density: "3k", combo: "crown_3000" },
+  ];
+  for (const { density, combo } of pairs) {
     const { sessionId } = await (await f.post("/token")).json();
     const lead = { ...await validLead(sessionId), area: "crown", density };
     assert.equal((await f.post("/leads", lead)).status, 200);
     assert.equal(f.leads.at(-1).lead.area, "crown");
     assert.equal(f.leads.at(-1).lead.density, density);
-    assert.equal((await f.post("/session-end", { sessionId, reason: "capture", billedSeconds: 10, wallSeconds: 11, switches: 1, combo: `crown_${density}`, captured: true })).status, 204);
+    assert.equal((await f.post("/session-end", {
+      sessionId, reason: "capture", billedSeconds: 10, wallSeconds: 11, switches: 1,
+      combo, captured: true, mode: "graft",
+    })).status, 204);
   }
 });
 test("referral with explicit third-party consent is accepted", async (t) => {
@@ -144,11 +154,27 @@ test("referral with explicit third-party consent is accepted", async (t) => {
 test("beacon text/plain body accepted; duplicate and invalid reports handled", async (t) => {
   const f = await fixture(t);
   const { sessionId } = await (await f.post("/token")).json();
-  const body = { sessionId, reason: "pagehide", billedSeconds: 20, wallSeconds: 21, switches: 2, combo: "hairline_2k", captured: false };
+  const body = { sessionId, reason: "pagehide", billedSeconds: 20, wallSeconds: 21, switches: 2, combo: "hairline_2000", captured: false };
   assert.equal((await f.post("/session-end", { ...body, billedSeconds: -1 })).status, 400);
   assert.equal((await f.post("/session-end", body, { "Content-Type": "text/plain" })).status, 204);
   assert.equal((await f.post("/session-end", body)).status, 204);
   assert.equal((await f.post("/session-end", { ...body, sessionId: "unknown" })).status, 400);
+});
+test("session-end with insufficient credits reason logs server error", async (t) => {
+  const errors = [];
+  const f = await fixture(t, { logger: { error: (...args) => errors.push(args.join(" ")) } });
+  const { sessionId } = await (await f.post("/token")).json();
+  assert.equal((await f.post("/session-end", {
+    sessionId,
+    reason: "connect-failed: Insufficient credits",
+    billedSeconds: 0,
+    wallSeconds: 1,
+    switches: 0,
+    combo: "baseline",
+    captured: false,
+    mode: "graft",
+  })).status, 204);
+  assert.ok(errors.some((line) => /Decart 크레딧 부족/.test(line)));
 });
 test("reference experienceType session-end is accepted without allowing arbitrary combo", async (t) => {
   const f = await fixture(t);
@@ -448,4 +474,73 @@ test("/graft-inpaint fills from person+mask and records model timing", async (t)
   assert.equal((await f.post("/graft-inpaint", { person, mask, area: "hairline", grafts: 500 })).status, 400);
   const none = await fixture(t, { graftInpaint: null });
   assert.equal((await none.post("/graft-inpaint", { person, mask, area: "hairline", grafts: 2000 })).status, 503);
+});
+
+test("/graft-fill composites via adapter and has separate quota", async (t) => {
+  const outJpeg = await sharp({ create: { width: 32, height: 40, channels: 3, background: { r: 40, g: 20, b: 10 } } }).jpeg().toBuffer();
+  let calls = 0;
+  let lastDensity = null;
+  const f = await fixture(t, {
+    env: { GRAFT_FILL_DAILY_IP_LIMIT: "1" },
+    graftFill: {
+      fill: async ({ density }) => {
+        calls++;
+        lastDensity = density;
+        return {
+          buffer: outJpeg,
+          mediaType: "image/jpeg",
+          model: "gemini-3-pro-image",
+          ms: 9,
+          estimatedCostUsd: 0.04,
+          densityLabel: density <= 0.7 ? "sparse" : density <= 0.85 ? "medium" : "dense",
+        };
+      },
+    },
+  });
+  const person = await jpegDataUrl();
+  const mask = `data:image/png;base64,${(await sharp({ create: { width: 8, height: 8, channels: 3, background: "#fff" } }).png().toBuffer()).toString("base64")}`;
+  const ok = await f.post("/graft-fill", { person, mask, area: "hairline", grafts: 2000 });
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.ok(body.image.startsWith("data:image/jpeg;base64,"));
+  assert.equal(body.densityLabel, "medium");
+  assert.equal(lastDensity, 0.8);
+  assert.equal(calls, 1);
+  assert.equal((await f.post("/graft-fill", { person, mask, area: "hairline", grafts: 1000 })).status, 429);
+  const none = await fixture(t, { graftFill: null });
+  assert.equal((await none.post("/graft-fill", { person, mask, area: "hairline", grafts: 2000 })).status, 503);
+});
+
+test("/baseline creates Norwood-style still once and has separate quota", async (t) => {
+  const outJpeg = await sharp({ create: { width: 32, height: 40, channels: 3, background: { r: 180, g: 150, b: 130 } } }).jpeg().toBuffer();
+  let calls = 0;
+  let lastPose = null;
+  const f = await fixture(t, {
+    env: { BASELINE_DAILY_IP_LIMIT: "1" },
+    baselineEditor: {
+      edit: async ({ pose }) => {
+        calls += 1;
+        lastPose = pose;
+        return {
+          buffer: outJpeg,
+          mediaType: "image/jpeg",
+          model: "gemini-3-pro-image",
+          ms: 9,
+          estimatedCostUsd: 0.04,
+        };
+      },
+    },
+  });
+  const person = await jpegDataUrl();
+  const ok = await f.post("/baseline", { person, pose: "front" });
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.ok(body.image.startsWith("data:image/jpeg;base64,"));
+  assert.equal(body.pose, "front");
+  assert.equal(lastPose, "front");
+  assert.equal(body.estimatedCostUsd, 0.04);
+  assert.equal((await f.post("/baseline", { person, pose: "crown" })).status, 429);
+  assert.equal(calls, 1);
+  const none = await fixture(t, { baselineEditor: null });
+  assert.equal((await none.post("/baseline", { person })).status, 503);
 });
