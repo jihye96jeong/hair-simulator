@@ -1,4 +1,5 @@
 import { ruleFor } from "./graftRules.js";
+import { clampFillSizeCm } from "./baselineLoss.js";
 
 /** Soft edge width in mm (병원 확인 전 임시값). */
 const FEATHER_MM = 3;
@@ -49,19 +50,27 @@ function taperedLowerCurve(upper, depthPx, templeLeft, templeRight) {
 
 /**
  * Hard geometric fill region (0..1) before feathering.
- * Larger sizeCm → deeper / wider fill. Density is not painted here; it goes to the inpaint prompt.
+ * When baselineGeometry is set, fill relative to the virtual-loss void.
  */
-export function buildFillMask({ area, measure, sizeCm, rgba, hairMask }) {
+export function buildFillMask({ area, measure, sizeCm, rgba, hairMask, baselineGeometry = null }) {
   const { width, height } = measure;
   const mask = new Float32Array(width * height);
-  const px = sizeCm * measure.pxPerCm;
+  const effectiveCm = baselineGeometry ? clampFillSizeCm(area, sizeCm) : sizeCm;
+  const px = effectiveCm * measure.pxPerCm;
   const protectY = measure.kind === "front"
     ? measure.browTopY - PROTECT_GAP_CM * measure.pxPerCm
     : height;
 
   if (area === "hairline") {
-    const upper = measure.hairlineCurve;
-    const lower = taperedLowerCurve(upper, px, measure.templeLeft, measure.templeRight);
+    const upper = baselineGeometry?.virtualHairline || measure.hairlineCurve;
+    const maxDepth = baselineGeometry
+      ? Math.min(px, (baselineGeometry.recedeCm || effectiveCm) * measure.pxPerCm)
+      : px;
+    // At full void size, restore the original hairline (nearly complete recovery).
+    const lower = baselineGeometry?.originalHairline
+      && effectiveCm >= (baselineGeometry.recedeCm || 0) - 1e-6
+      ? baselineGeometry.originalHairline
+      : taperedLowerCurve(upper, maxDepth, measure.templeLeft, measure.templeRight);
     const minX = Math.floor(Math.min(upper[0].x, lower[0].x));
     const maxX = Math.ceil(Math.max(upper[upper.length - 1].x, lower[lower.length - 1].x));
     for (let x = minX; x <= maxX; x++) {
@@ -100,7 +109,8 @@ export function buildFillMask({ area, measure, sizeCm, rgba, hairMask }) {
       }
     }
   } else if (area === "crown") {
-    const { x: cx, y: cy } = measure.crownCenter;
+    const center = baselineGeometry?.crownCenter || measure.crownCenter;
+    const { x: cx, y: cy } = center;
     const r = px;
     const r2 = r * r;
     const minX = Math.max(0, Math.floor(cx - r - 1));
@@ -113,12 +123,16 @@ export function buildFillMask({ area, measure, sizeCm, rgba, hairMask }) {
         const dy = y - cy;
         if (dx * dx + dy * dy > r2) continue;
         const i = y * width + x;
+        if (baselineGeometry) {
+          // Fill voided crown disk; density applied via prompt / sparse keep.
+          mask[i] = 1;
+          continue;
+        }
         if (!hairMask[i]) continue;
         const o = i * 4;
         const bright = rgba
           && rgba[o] > 120 && rgba[o + 1] > 100 && rgba[o + 2] > 90
           && Math.max(rgba[o], rgba[o + 1], rgba[o + 2]) - Math.min(rgba[o], rgba[o + 1], rgba[o + 2]) < 50;
-        // Prefer scalp-showing pixels; still allow sparse fill inside radius.
         if (!bright && (x + y) % 2 !== 0) continue;
         mask[i] = 1;
       }
@@ -225,7 +239,40 @@ function countFilled(fillMask, threshold = 0.15) {
 }
 
 /**
- * Build a feathered fill mask only (white = inpaint). No painted hair.
+ * Target geometric region minus already-dense hair.
+ * In baseline mode prefer filling the void (baselineMask) even if residual hair remains.
+ */
+export function subtractExistingHair(targetMask, hairMask, rgba, width, height, {
+  keepSparse = true,
+  baselineMask = null,
+} = {}) {
+  const fill = new Float32Array(width * height);
+  const boost = new Float32Array(width * height);
+  for (let i = 0; i < targetMask.length; i++) {
+    if (targetMask[i] <= 0) continue;
+    if (baselineMask && baselineMask[i] > 0.2) {
+      fill[i] = targetMask[i];
+      continue;
+    }
+    if (!hairMask[i]) {
+      fill[i] = targetMask[i];
+      continue;
+    }
+    const o = i * 4;
+    const bright = rgba
+      && rgba[o] > 120 && rgba[o + 1] > 100 && rgba[o + 2] > 90
+      && Math.max(rgba[o], rgba[o + 1], rgba[o + 2]) - Math.min(rgba[o], rgba[o + 1], rgba[o + 2]) < 50;
+    if (bright || keepSparse) {
+      boost[i] = targetMask[i] * (bright ? 1 : 0.55);
+      fill[i] = boost[i];
+    }
+  }
+  return { fill, boost };
+}
+
+/**
+ * Build a feathered fill mask only (white = inpaint).
+ * When baselineLoss is provided, guide input is the virtual-loss frame.
  */
 export async function buildGraftMask({
   imageData,
@@ -233,40 +280,73 @@ export async function buildGraftMask({
   measure,
   area,
   grafts,
+  baselineLoss = null,
 }) {
   const rule = ruleFor(area, grafts);
   const { width, height } = measure;
-  if (imageData.width !== width || imageData.height !== height) {
+  const sourceImage = baselineLoss?.imageData || imageData;
+  const sourceHair = baselineLoss?.hairMask || hairMask;
+  if (sourceImage.width !== width || sourceImage.height !== height) {
     throw new Error("frame-size-mismatch");
   }
-  const hard = buildFillMask({
+  const sizeCm = baselineLoss ? clampFillSizeCm(area, rule.sizeCm) : rule.sizeCm;
+  const target = buildFillMask({
     area,
     measure,
     sizeCm: rule.sizeCm,
-    rgba: imageData.data,
-    hairMask,
+    rgba: sourceImage.data,
+    hairMask: sourceHair,
+    baselineGeometry: baselineLoss?.geometry || null,
   });
+  const { fill: rawFill, boost } = subtractExistingHair(
+    target,
+    sourceHair,
+    sourceImage.data,
+    width,
+    height,
+    { baselineMask: baselineLoss?.baselineMask || null },
+  );
   const radiusPx = Math.max(1, FEATHER_MM * 0.1 * measure.pxPerCm);
-  let soft = featherMask(hard, width, height, radiusPx);
+  let soft = featherMask(rawFill, width, height, radiusPx);
   if (measure.kind === "front") {
     soft = protectBelowBrow(soft, width, height, measure.browTopY);
   }
   const rgba = maskToRgba(soft);
   const maskCanvas = canvasFromRgba(rgba, width, height);
   const mask = await canvasToBlob(maskCanvas, "image/png");
+  const filledPixels = countFilled(soft);
+  const voidPixels = baselineLoss
+    ? countFilled(baselineLoss.baselineMask, 0.9)
+    : 0;
+  let coveredVoid = 0;
+  if (baselineLoss) {
+    for (let i = 0; i < soft.length; i++) {
+      if (baselineLoss.baselineMask[i] >= 0.9 && soft[i] >= 0.15) coveredVoid += 1;
+    }
+  }
   return {
     mask,
     fillMask: soft,
+    boostMask: boost,
+    targetMask: target,
     rgba,
+    personImageData: sourceImage,
+    baselineLoss,
     stats: {
       area,
       grafts,
-      sizeCm: rule.sizeCm,
+      sizeCm,
       density: rule.density,
       pxPerCm: measure.pxPerCm,
-      filledPixels: countFilled(soft),
+      filledPixels,
+      boostPixels: countFilled(boost, 0.1),
+      voidPixels,
+      filledCm2: filledPixels / (measure.pxPerCm * measure.pxPerCm),
+      voidCm2: voidPixels / (measure.pxPerCm * measure.pxPerCm),
+      fillRatioOfVoid: voidPixels > 0 ? coveredVoid / voidPixels : null,
       hash: hashBuffer(rgba),
       featherPx: radiusPx,
+      baseline: Boolean(baselineLoss),
     },
   };
 }
@@ -291,15 +371,18 @@ export function assertProtectedRegionUnmasked(fillMask, width, height, browTopY)
   return true;
 }
 
-/** @deprecated Prefer assertProtectedRegionUnmasked for mask-only guides. */
+/** Pixel-equal check for protected region between original and guided RGBA. */
 export function assertProtectedRegionUnchanged(originalRgba, guidedRgba, width, height, browTopY) {
-  void originalRgba;
-  void guidedRgba;
-  // Legacy painted-guide helper no longer applies; treat as pass-through for old call sites.
-  return assertProtectedRegionUnmasked(
-    new Float32Array(width * height),
-    width,
-    height,
-    browTopY,
-  );
+  const from = Math.floor(browTopY);
+  for (let y = Math.max(0, from); y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      if (
+        originalRgba[o] !== guidedRgba[o]
+        || originalRgba[o + 1] !== guidedRgba[o + 1]
+        || originalRgba[o + 2] !== guidedRgba[o + 2]
+      ) return false;
+    }
+  }
+  return true;
 }

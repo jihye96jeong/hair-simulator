@@ -103,6 +103,18 @@ const graftFlow = createGraftFlow({
     return Boolean(config?.graftEnhanceDefault);
   },
   getEditModel: () => (lab ? (params.get("editmodel") || "") : ""),
+  getPrefetchMode: () => window.__graftPrefetchMode || params.get("prefetch") || "preferred",
+  getDelaySync: () => {
+    if (typeof window.__graftDelaySync === "boolean") return window.__graftDelaySync;
+    if (params.get("delay") === "off") return false;
+    return true;
+  },
+  getBaselineLoss: () => {
+    if (!lab) return false;
+    if (typeof window.__graftBaselineLoss === "boolean") return window.__graftBaselineLoss;
+    if (params.get("baseline") === "off") return false;
+    return true;
+  },
   isLab: lab,
 });
 

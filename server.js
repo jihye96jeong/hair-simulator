@@ -62,6 +62,8 @@ export async function createApp({
   const describeQuota = new DailyQuota({ ipLimit: config.describeIpLimit, totalLimit: config.describeTotalLimit, now });
   const previewQuota = new DailyQuota({ ipLimit: config.previewIpLimit, totalLimit: config.previewTotalLimit, now });
   const graftQuota = new DailyQuota({ ipLimit: config.graftInpaintIpLimit, totalLimit: config.graftInpaintTotalLimit, now });
+  /** sessionId:area:grafts:view → still payload (no durable disk). */
+  const graftStillCache = new Map();
   const sessions = new Map();
   const client = decart || (config.decartKey ? createDecartClient({ apiKey: config.decartKey, logger: noopLogger }) : null);
   const vision = hairVision === undefined
@@ -226,6 +228,22 @@ export async function createApp({
     if (!GRAFT_AREAS.includes(area) || !GRAFT_LEVELS.includes(grafts)) {
       return res.status(400).json({ error: "부위와 모량을 확인해 주세요." });
     }
+    const view = req.body?.view === "crown" ? "crown" : "front";
+    const cacheKey = typeof req.body?.sessionId === "string" && req.body.sessionId
+      ? `${req.body.sessionId}:${area}:${grafts}:${view}`
+      : "";
+    if (cacheKey && graftStillCache.has(cacheKey)) {
+      const hit = graftStillCache.get(cacheKey);
+      return res.json({ ...hit, cached: true });
+    }
+
+    const analysis = req.body?.analysis && typeof req.body.analysis === "object"
+      ? {
+        color: String(req.body.analysis.color || "").slice(0, 32),
+        length: String(req.body.analysis.length || "").slice(0, 32),
+        type: String(req.body.analysis.type || "").slice(0, 32),
+      }
+      : undefined;
 
     const reservation = graftQuota.reserve(req.ip);
     if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
@@ -238,6 +256,7 @@ export async function createApp({
         maskMediaType: mask.mediaType,
         area,
         grafts,
+        analysis,
       });
       logger.info?.("graft-inpaint", {
         ok: true,
@@ -247,20 +266,45 @@ export async function createApp({
         densityLabel: result.densityLabel,
         area,
         grafts,
+        view,
+        cached: false,
       });
-      res.json({
+      const payload = {
         image: `data:${result.mediaType};base64,${result.buffer.toString("base64")}`,
         model: result.model,
         ms: result.ms ?? (Date.now() - started),
         estimatedCostUsd: result.estimatedCostUsd,
         densityLabel: result.densityLabel,
-      });
+        cached: false,
+      };
+      if (cacheKey) {
+        graftStillCache.set(cacheKey, payload);
+        // Bound memory: drop oldest when large
+        if (graftStillCache.size > 200) {
+          const first = graftStillCache.keys().next().value;
+          graftStillCache.delete(first);
+        }
+      }
+      res.json(payload);
     } catch {
       reservation.release();
       logger.info?.("graft-inpaint", { ok: false, ms: Date.now() - started, model: modelChoice.model });
       logger.error("모수 인페인팅 실패");
       res.status(502).json({ error: "모발 채우기 이미지를 만들지 못했어요. 다시 시도해 주세요." });
     }
+  });
+
+  app.get("/graft-cache/:sessionId", (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const id = req.params.sessionId;
+    const ready = [];
+    for (const key of graftStillCache.keys()) {
+      if (key.startsWith(`${id}:`)) {
+        const [, area, grafts, view] = key.split(":");
+        ready.push({ area, grafts: Number(grafts), view });
+      }
+    }
+    res.json({ ready });
   });
 
   app.post("/token", async (req, res) => {

@@ -22,3 +22,9 @@ credentials/
 
 # Local reference clone (not part of this repo)
 change_ai/
+lab/fixtures/videos/*
+!lab/fixtures/videos/README.md
+lab/fixtures/crown/*
+!lab/fixtures/crown/.gitkeep
+lab/results/*
+!lab/results/.gitkeep

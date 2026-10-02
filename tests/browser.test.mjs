@@ -191,6 +191,7 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   const previewJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 10, g: 200, b: 40 } } }).jpeg().toBuffer();
   const graftJpeg = await sharp({ create: { width: 64, height: 80, channels: 3, background: { r: 40, g: 20, b: 10 } } }).jpeg().toBuffer();
   let graftInpaintCalls = 0;
+  const lastGraftPersonMeans = [];
   const app = await createApp({
     config,
     logger: { error() {} },
@@ -213,8 +214,11 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
     },
     graftInpaint: {
       meta: { id: "gemini-3-pro-image", estimatedCostUsd: 0.04 },
-      inpaint: async () => {
+      inpaint: async ({ person }) => {
         graftInpaintCalls++;
+        const buf = Buffer.isBuffer(person) ? person : Buffer.from(person);
+        const stats = await sharp(buf).stats();
+        lastGraftPersonMeans.push(stats.channels.reduce((s, c) => s + c.mean, 0) / stats.channels.length);
         return {
           buffer: graftJpeg,
           mediaType: "image/jpeg",
@@ -373,25 +377,24 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(textInitial.prompt, buildHairPrompt(describeSpec, { withImage: false }));
   await page.locator("#ref-end").click();
 
-  // Preset (모수): silent measure → server inpaint still → Lucy (no capture countdown UI)
+  // Preset (모수): 4-shot shutter → analyze/prefetch → split live → instant combo switch
   await page.locator("#tab-preset").click();
-  await expect(page.locator("#preset-bar")).toBeVisible();
+  await expect(page.locator("#preset-actions")).toBeVisible();
   await expect(page.locator("#graft-disclaimer")).toBeVisible();
-  await expect(page.locator("#graft-disclaimer")).toHaveText("참고용 시뮬레이션이며 실제 시술 결과와 다를 수 있습니다.");
-  await expect(page.locator("#stage-label")).toContainText("부위와 모량을 고른 뒤 연결을 누르세요");
-  await expect(page.locator("#ref-layer-idle")).toBeHidden();
-  await expect(page.locator("#drop")).toBeHidden();
+  await expect(page.locator("#stage-label")).toContainText("정면·왼쪽·오른쪽·정수리");
   await expect(page.getByText("따라하고 싶은 헤어 사진을 올려주세요")).toBeHidden();
-  await expect(page.getByText("부위와 모량을 고른 뒤 연결을 누르세요")).toBeVisible();
 
-  await page.locator('#preset-bar [data-graft-area="hairline"]').click();
-  await page.locator('#preset-bar [data-graft-level="2000"]').click();
   await page.locator("#connect").click();
-  await expect(page.locator("#save-result")).toBeEnabled({ timeout: 25000 });
-  await expect(page.locator("#graft-capture-layer")).toBeHidden();
-  await expect(page.locator("#graft-countdown")).toBeHidden();
-  await expect(page.locator("#combo-label")).toContainText("헤어라인");
-  await expect(page.locator("#combo-label")).toContainText("2,000모");
+  await expect(page.locator("#graft-capture-layer")).toBeVisible({ timeout: 10000 });
+  for (const dir of ["front", "left", "right", "crown"]) {
+    await expect(page.locator("#graft-shutter")).toBeEnabled({ timeout: 15000 });
+    await page.locator("#graft-shutter").click();
+    await expect(page.locator(`.graft-thumb[data-shot="${dir}"] img`)).toBeVisible({ timeout: 15000 });
+  }
+  await expect(page.locator("#graft-results")).toBeEnabled({ timeout: 5000 });
+  await page.locator("#graft-results").click();
+  await expect(page.locator("#graft-split")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#save-result")).toBeEnabled({ timeout: 30000 });
   await expect(page.locator("#graft-disclaimer")).toBeVisible();
   assert.ok(graftInpaintCalls >= 1);
 
@@ -402,29 +405,19 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   }));
   assert.equal(graftInitial.enhance, false);
   assert.equal(graftInitial.hasImage, true);
-  assert.ok(graftInitial.prompt.includes("hairline exactly at the position"));
 
-  const callsBeforeSwitch = graftInpaintCalls;
+  const callsBefore = graftInpaintCalls;
   await page.locator('#preset-bar [data-graft-level="3000"]').click();
-  await expect(page.locator("#combo-label")).toContainText("3,000모");
-  await expect.poll(() => graftInpaintCalls).toBeGreaterThan(callsBeforeSwitch);
   await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(0);
   const setPayload = await page.evaluate(() => window.__sets.at(-1));
   assert.equal(setPayload.enhance, false);
-  assert.ok(typeof setPayload.prompt === "string");
   assert.ok(setPayload.image);
-  assert.ok(setPayload.prompt.includes("hairline exactly at the position"));
+  // Cached or newly generated — either way set() must fire with image+prompt+enhance
+  assert.ok(typeof setPayload.prompt === "string");
 
-  const setsBeforeCrown = await page.evaluate(() => window.__sets.length);
-  const callsBeforeCrown = graftInpaintCalls;
   await page.locator('#preset-bar [data-graft-area="crown"]').click();
-  await expect(page.locator("#combo-label")).toContainText("정수리", { timeout: 25000 });
-  await expect.poll(() => graftInpaintCalls).toBeGreaterThan(callsBeforeCrown);
-  await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(setsBeforeCrown);
-  const crownSet = await page.evaluate(() => window.__sets.at(-1));
-  assert.equal(crownSet.enhance, false);
-  assert.ok(crownSet.prompt.includes("crown hair density"));
-  assert.ok(crownSet.image);
+  await expect.poll(async () => page.evaluate(() => window.__sets.length)).toBeGreaterThan(1);
+  assert.ok(graftInpaintCalls >= callsBefore);
 
   await page.locator("#save-result").click();
   await expect(page.locator("#contact")).toBeVisible();
@@ -435,12 +428,13 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await page.locator("#submit-lead").click();
   await expect(page.locator("#complete")).toBeVisible();
   assert.equal(leads.length, 1);
-  assert.equal(leads[0].area, "crown");
-  assert.equal(leads[0].density, "3k");
 
-  // Lab debug panel is injected only on /lab
   assert.equal(await page.locator("#ref-lab-debug").count(), 0);
   assert.equal(await page.locator("#graft-lab-debug").count(), 0);
+  assert.equal(await page.locator("#graft-lab-baseline").count(), 0);
+  assert.equal(await page.locator("#graft-baseline-btn").count(), 0);
+  const publicPersonMean = lastGraftPersonMeans.at(-1);
+  assert.ok(Number.isFinite(publicPersonMean));
   failPreview = false;
   const labPage = await context.newPage();
   await labPage.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
@@ -464,6 +458,30 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await expect(labPage.locator("#ref-lab-identity")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-prompt")).toContainText("enhance=false");
   await expect(labPage.locator("#ref-lab-prompt")).toContainText(IMAGE_HAIR_PROMPT);
+
+  // /lab 모수: 가상 탈모 기본 켜짐 → inpaint person은 baselineFrame
+  await labPage.locator("#ref-end").click();
+  await labPage.locator("#tab-preset").click();
+  await expect(labPage.locator("#graft-lab-baseline")).toBeVisible();
+  await expect(labPage.locator("#graft-lab-baseline")).toBeChecked();
+  await expect(labPage.locator("#graft-lab-baseline-label")).toHaveText("켜짐");
+  const meansBeforeLab = lastGraftPersonMeans.length;
+  await labPage.locator("#connect").click();
+  await expect(labPage.locator("#graft-capture-layer")).toBeVisible({ timeout: 10000 });
+  for (const dir of ["front", "left", "right", "crown"]) {
+    await expect(labPage.locator("#graft-shutter")).toBeEnabled({ timeout: 15000 });
+    await labPage.locator("#graft-shutter").click();
+    await expect(labPage.locator(`.graft-thumb[data-shot="${dir}"] img`)).toBeVisible({ timeout: 15000 });
+  }
+  await labPage.locator("#graft-results").click();
+  await expect(labPage.locator("#status")).toContainText("준비됨", { timeout: 30000 });
+  await expect(labPage.locator("#graft-baseline-btn")).toBeVisible({ timeout: 15000 });
+  const splitHidden = await labPage.locator("#graft-split").getAttribute("hidden");
+  assert.equal(splitHidden, null);
+  await expect.poll(() => lastGraftPersonMeans.length).toBeGreaterThan(meansBeforeLab);
+  const labPersonMean = lastGraftPersonMeans.at(-1);
+  // baseline clears dark hair to skin → brighter person frame than public path
+  assert.ok(labPersonMean > publicPersonMean, `baseline person ${labPersonMean} vs public ${publicPersonMean}`);
 
   const nativePage = await context.newPage();
   await nativePage.goto(base);

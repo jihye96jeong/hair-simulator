@@ -1,8 +1,18 @@
 /**
  * 병원 확인 전 임시값.
- * 병원 기준을 받으면 이 표(RULES / GRAFT_LEVELS)만 바꿔도 되도록 숫자를 한곳에 모은다.
+ * 병원 기준을 받으면 이 표(RULES / GRAFT_LEVELS / BASELINE)만 바꿔도 되도록 숫자를 한곳에 모은다.
  */
 export const GRAFT_LEVELS = Object.freeze([1000, 2000, 3000]);
+
+/**
+ * 가상 탈모 기준선 (탈모 없는 얼굴 테스트용). 병원 확인 전 임시값.
+ * 3000모 sizeCm ≈ 여기 비운 크기 → 거의 원래 상태로 복원되도록 맞춤.
+ */
+export const BASELINE = Object.freeze({
+  hairline: Object.freeze({ recedeCm: 2.5 }),
+  mline: Object.freeze({ cornerCm: 3.0 }),
+  crown: Object.freeze({ radiusCm: 4.0, thinning: 0.7 }),
+});
 
 /**
  * sizeCm 의미:
@@ -10,22 +20,24 @@ export const GRAFT_LEVELS = Object.freeze([1000, 2000, 3000]);
  * - hairline: 헤어라인을 아래로 내리는 깊이
  * - crown: 채우는 원의 반지름
  * density: 새로 채우는 영역의 머리카락 밀도 (0~1)
+ *
+ * 3000모는 BASELINE 비운 크기와 맞춰 거의 전부 채우도록 임시 조정.
  */
 export const RULES = Object.freeze({
   mline: Object.freeze({
     1000: Object.freeze({ sizeCm: 1.0, density: 0.6 }),
-    2000: Object.freeze({ sizeCm: 1.8, density: 0.8 }),
-    3000: Object.freeze({ sizeCm: 2.5, density: 0.95 }),
+    2000: Object.freeze({ sizeCm: 2.0, density: 0.8 }),
+    3000: Object.freeze({ sizeCm: 3.0, density: 0.95 }),
   }),
   hairline: Object.freeze({
-    1000: Object.freeze({ sizeCm: 0.8, density: 0.6 }),
-    2000: Object.freeze({ sizeCm: 1.5, density: 0.8 }),
-    3000: Object.freeze({ sizeCm: 2.2, density: 0.95 }),
+    1000: Object.freeze({ sizeCm: 0.9, density: 0.6 }),
+    2000: Object.freeze({ sizeCm: 1.7, density: 0.8 }),
+    3000: Object.freeze({ sizeCm: 2.5, density: 0.95 }),
   }),
   crown: Object.freeze({
-    1000: Object.freeze({ sizeCm: 2.0, density: 0.6 }),
-    2000: Object.freeze({ sizeCm: 3.0, density: 0.8 }),
-    3000: Object.freeze({ sizeCm: 3.8, density: 0.95 }),
+    1000: Object.freeze({ sizeCm: 1.5, density: 0.6 }),
+    2000: Object.freeze({ sizeCm: 2.8, density: 0.8 }),
+    3000: Object.freeze({ sizeCm: 4.0, density: 0.95 }),
   }),
 });
 

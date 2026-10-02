@@ -58,7 +58,8 @@ test("hairline curve and front measure from fake masks", () => {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = y * width + x;
-      if (y < 28 + Math.sin(x / 10) * 2) labels[i] = 1; // hair
+      // Keep hairline high enough for FOREHEAD_EXPOSE_MIN_CM (temporary).
+      if (y < 16 + Math.sin(x / 10) * 2) labels[i] = 1; // hair
       else if (y < 70) labels[i] = 3; // face skin
     }
   }
@@ -75,7 +76,28 @@ test("hairline curve and front measure from fake masks", () => {
   });
   assert.equal(measure.kind, "front");
   assert.ok(measure.pxPerCm > 0);
+  assert.ok(measure.foreheadExposeCm >= 2.5);
   assert.ok(measure.templeLeft.x < measure.templeRight.x);
+});
+
+test("front measure rejects bangs covering forehead", () => {
+  const width = 80;
+  const height = 100;
+  const labels = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if (y < 30) labels[i] = 1; // hair almost to brow (~32)
+      else if (y < 70) labels[i] = 3;
+    }
+  }
+  assert.throws(() => measureFrontFromInputs({
+    landmarks: fakeLandmarks(),
+    width,
+    height,
+    hairMask: categoryMaskFromLabels(labels, width, height, 1),
+    faceMask: categoryMaskFromLabels(labels, width, height, 3),
+  }), /앞머리를 넘겨/);
 });
 
 test("crown measure finds center and rejects tiny hair", () => {
@@ -112,18 +134,13 @@ test("crown measure finds center and rejects tiny hair", () => {
 });
 
 test("medianMeasure stabilizes front samples", () => {
+  const labels = Uint8Array.from({ length: 80 * 100 }, (_, i) => (Math.floor(i / 80) < 16 ? 1 : 3));
   const base = measureFrontFromInputs({
     landmarks: fakeLandmarks(),
     width: 80,
     height: 100,
-    hairMask: categoryMaskFromLabels(
-      Uint8Array.from({ length: 80 * 100 }, (_, i) => (Math.floor(i / 80) < 30 ? 1 : 3)),
-      80, 100, 1,
-    ),
-    faceMask: categoryMaskFromLabels(
-      Uint8Array.from({ length: 80 * 100 }, (_, i) => (Math.floor(i / 80) < 30 ? 1 : 3)),
-      80, 100, 3,
-    ),
+    hairMask: categoryMaskFromLabels(labels, 80, 100, 1),
+    faceMask: categoryMaskFromLabels(labels, 80, 100, 3),
   });
   const jittered = [0, 1, -1].map((d) => ({
     ...base,

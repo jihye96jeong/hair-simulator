@@ -18,6 +18,11 @@ export const SELFIE_SEGMENTER_MODEL_PATH = "/models/selfie_multiclass_256x256.tf
 /** Selfie multiclass categories (MediaPipe selfie_multiclass_256x256). */
 export const SEG_HAIR = 1;
 export const SEG_FACE_SKIN = 3;
+/**
+ * Min forehead exposure (browTopY → hairline mid) in cm before front measure locks.
+ * 병원 확인 전 임시값.
+ */
+export const FOREHEAD_EXPOSE_MIN_CM = 2.5;
 
 let landmarkerPromise = null;
 let segmenterPromise = null;
@@ -60,6 +65,29 @@ export function browTopYFromPoints(points) {
     if (points[i]) minY = Math.min(minY, points[i].y);
   }
   return Number.isFinite(minY) ? minY : NaN;
+}
+
+/** Forehead exposure height in cm: browTopY down from hairline mid. */
+export function foreheadExposeCm({ browTopY, hairlineCurve, pxPerCm }) {
+  if (!Number.isFinite(browTopY) || !Number.isFinite(pxPerCm) || pxPerCm <= 0) return NaN;
+  if (!hairlineCurve?.length) return NaN;
+  const mid = hairlineCurve[Math.floor(hairlineCurve.length / 2)];
+  return (browTopY - mid.y) / pxPerCm;
+}
+
+/**
+ * Reject front measures when bangs hide the forehead (< FOREHEAD_EXPOSE_MIN_CM).
+ * Caller may wait and re-measure.
+ */
+export function assertForeheadExposed(measure) {
+  const cm = foreheadExposeCm(measure);
+  if (!(cm >= FOREHEAD_EXPOSE_MIN_CM)) {
+    const error = new Error("앞머리를 넘겨 이마가 보이게 해주세요");
+    error.code = "forehead-bangs";
+    error.foreheadExposeCm = cm;
+    throw error;
+  }
+  return cm;
 }
 
 /**
@@ -224,7 +252,7 @@ export function measureFrontFromInputs({
     throw error;
   }
   const temples = templesFromCurveAndLandmarks(hairlineCurve, points);
-  return {
+  const measure = {
     kind: "front",
     width,
     height,
@@ -233,6 +261,11 @@ export function measureFrontFromInputs({
     hairlineCurve,
     templeLeft: temples.templeLeft,
     templeRight: temples.templeRight,
+  };
+  const foreheadExposeCmValue = assertForeheadExposed(measure);
+  return {
+    ...measure,
+    foreheadExposeCm: foreheadExposeCmValue,
   };
 }
 
