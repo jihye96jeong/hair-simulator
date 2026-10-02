@@ -1,3 +1,8 @@
+/**
+ * Face restore is unused in the live pipeline (referenceFlow never calls it).
+ * Prior runs glued selfie bangs onto the Gemini result and warped identity into a third face.
+ * Keep these helpers for experiments; do not composite unless alignment is proven stable.
+ */
 import {
   EYEBROW_INDICES,
   FACE_OVAL_RING,

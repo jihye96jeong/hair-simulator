@@ -1,7 +1,7 @@
 export const REFERENCE_ENHANCE = false;
 
-/** Lucy prompt when a Gemini preview image is attached (no structured hair-spec sentences). */
-export const IMAGE_HAIR_PROMPT = "Apply the exact hairstyle from the reference image, including the direction of the front hair, how much forehead is visible, the side length around the ears, the top length, texture, and color. The hair grows from the person's own scalp and moves naturally with their head. Keep the person's face, eyes, eyebrows, skin, expression, and identity unchanged.";
+/** Lucy prompt when a Gemini preview image is attached. Lock the attached preview; do not restyle. */
+export const IMAGE_HAIR_PROMPT = "Keep the hairstyle already shown in this attached photo, including the front hair direction, fringe, part, forehead coverage, side length, top silhouette, texture, volume, and color. Do not restyle or reinterpret the hair. The hair grows from the person's own scalp and moves naturally with their head. Keep the person's face, eyes, eyebrows, nose, mouth, jaw, ears, neck, skin, expression, clothing, background, and identity unchanged.";
 
 export const HAIR_LENGTHS = Object.freeze(["buzz", "very_short", "short", "chin", "shoulder", "chest", "long"]);
 export const HAIR_BANGS = Object.freeze(["none", "see_through", "full", "side_swept", "curtain"]);
@@ -185,7 +185,20 @@ export function sanitizeHairSpec(raw) {
 
 /** One English sentence of edit targets from sanitized enum fields only. */
 export function buildEditFeatures(spec) {
-  return `${FRONT_EN[spec.front]}, ${FOREHEAD_EN[spec.forehead]}, ${SIDES_EN[spec.sides]}, ${TOP_EN[spec.top]} with ${TEXTURE_EDIT_EN[spec.texture]}, ${spec.color} color.`;
+  const bangs = spec.bangs === "none" ? "no bangs" : BANGS_EN[spec.bangs];
+  const part = spec.part === "none" ? "no part" : PART_EN[spec.part];
+  return [
+    FRONT_EN[spec.front],
+    FOREHEAD_EN[spec.forehead],
+    bangs,
+    part,
+    `${LENGTH_EN[spec.length]} overall length`,
+    SIDES_EN[spec.sides],
+    TOP_EN[spec.top],
+    `${VOLUME_EN[spec.volume]} volume`,
+    TEXTURE_EDIT_EN[spec.texture],
+    `${spec.color} color.`,
+  ].join(", ");
 }
 
 export function buildHairPrompt(spec, { withImage = false } = {}) {
@@ -193,7 +206,7 @@ export function buildHairPrompt(spec, { withImage = false } = {}) {
   if (spec.bangs !== "none") details.push(BANGS_EN[spec.bangs]);
   if (spec.part !== "none") details.push(PART_EN[spec.part]);
   details.push(TEXTURE_EN[spec.texture]);
-  const body = `Change only the hair to a ${LENGTH_EN[spec.length]} ${spec.cut} with ${details.join(", ")}, ${VOLUME_EN[spec.volume]} volume, ${spec.color} color. The hair grows naturally from the person's own scalp and moves with their head. Keep the person's face, eyes, eyebrows, skin, expression, and identity unchanged.`;
+  const body = `Change only the hair to a ${LENGTH_EN[spec.length]} ${spec.cut} with ${details.join(", ")}, ${VOLUME_EN[spec.volume]} volume, ${spec.color} color. The hair grows naturally from the person's own scalp and moves with their head. Keep the person's face, eyes, eyebrows, nose, mouth, jaw, ears, neck, skin, expression, clothing, background, and identity unchanged.`;
   const prompt = withImage
     ? `Give the person the exact hairstyle shown in the reference image: ${body}`
     : body;

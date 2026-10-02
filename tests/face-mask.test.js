@@ -6,6 +6,7 @@ import {
   EYE_INDICES,
   FACE_OVAL_RING,
   MASK_FILL,
+  MASK_SIDE_INSET,
   buildFaceMaskPolygon,
   computeMaskTopY,
   landmarksToPixels,
@@ -50,6 +51,10 @@ test("buildFaceMaskPolygon stays below brows and follows the oval chin", () => {
   const maxY = Math.max(...polygon.map((p) => p.y));
   assert.ok(maxY > height * 0.6, "chin should be included");
   assert.equal(MASK_FILL, "#808080");
+  const minX = Math.min(...polygon.map((p) => p.x));
+  const maxX = Math.max(...polygon.map((p) => p.x));
+  const fullWidth = 200 * 0.22 * 2;
+  assert.ok(maxX - minX < fullWidth * (1 - MASK_SIDE_INSET / 2), "temples inset so side hair stays");
 });
 
 test("buildFaceMaskPolygon rejects incomplete landmark sets", () => {

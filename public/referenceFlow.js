@@ -5,6 +5,7 @@ import { RealtimeSession } from "./session.js";
 import { openFrontCamera, stopMediaStream } from "./camera.js";
 import { captureFrame, downloadCapture } from "./capture.js";
 import { createSelfieCapture } from "./selfie.js";
+import { prepareHairGuide } from "./hairGuide.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -64,6 +65,13 @@ export function createReferenceFlow({
   let previewCandidates = [];
   let previewPersonCore = null;
   let previewReferenceCore = null;
+  let previewFailReasons = [];
+  let lucyFrameDataUrl = "";
+  let labGuideDataUrl = "";
+  let labHairOnlyDataUrl = "";
+  let labEditMaskDataUrl = "";
+  let guideReason = "";
+  let guideUsed = false;
   let previewFailCount = 0;
   let consented = false;
   let detailOpen = false;
@@ -97,6 +105,32 @@ export function createReferenceFlow({
   }
   function revoke(url) { if (url) URL.revokeObjectURL(url); }
   function setGlobalError(message) { onGlobalError(message); }
+
+  async function grabLabStreamFrame(stream) {
+    const track = stream?.getVideoTracks?.()[0];
+    if (!track) return "";
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    try {
+      await video.play();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      if (!video.videoWidth) return "";
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return "";
+      ctx.drawImage(video, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.85);
+    } catch {
+      return "";
+    } finally {
+      video.pause();
+      video.srcObject = null;
+    }
+  }
 
   async function logPipelineTrace({ useImage, prompt, imageBlob }) {
     const geminiRefHash = await hashImageInput(maskedReferenceDataUrl || referenceDataUrl);
@@ -141,18 +175,33 @@ export function createReferenceFlow({
     }
   }
 
-  function attachLabCopyButton(figure, captionText) {
+  function attachLabMediaActions(figure, captionText, filename) {
     const cap = document.createElement("figcaption");
     cap.textContent = captionText;
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "ref-lab-copy";
-    btn.textContent = "복사";
-    btn.addEventListener("click", () => {
+    const row = document.createElement("div");
+    row.className = "ref-lab-actions";
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "ref-lab-copy";
+    copyBtn.textContent = "복사";
+    copyBtn.addEventListener("click", () => {
       const img = figure.querySelector("img");
-      void copyLabImage(img, btn);
+      void copyLabImage(img, copyBtn);
     });
-    figure.append(cap, btn);
+    const dl = document.createElement("a");
+    dl.className = "ref-lab-download";
+    dl.textContent = "저장";
+    dl.download = filename || "lab.png";
+    dl.addEventListener("click", (event) => {
+      const img = figure.querySelector("img");
+      if (!img?.src) {
+        event.preventDefault();
+        return;
+      }
+      dl.href = img.src;
+    });
+    row.append(copyBtn, dl);
+    figure.append(cap, row);
   }
 
   function ensureLabDebug() {
@@ -171,21 +220,36 @@ export function createReferenceFlow({
       fig.append(img);
       return fig;
     };
-    const refFig = mkFigure("ref-lab-gemini-ref", "Gemini 레퍼런스");
-    attachLabCopyButton(refFig, "0 gemini ref (masked)");
-    const selfieFig = mkFigure("ref-lab-selfie", "크롭 정면");
-    attachLabCopyButton(selfieFig, "1 selfie");
+    const originalFig = mkFigure("ref-lab-original", "원본 레퍼런스");
+    attachLabMediaActions(originalFig, "0 original reference", "00-original-reference.jpg");
+    const maskedFig = mkFigure("ref-lab-masked", "마스크 레퍼런스");
+    attachLabMediaActions(maskedFig, "1 masked reference → Gemini", "01-masked-reference.jpg");
+    const selfieFig = mkFigure("ref-lab-selfie", "사용자 셀피");
+    attachLabMediaActions(selfieFig, "2 selfie crop", "02-selfie.jpg");
+    const guideFig = mkFigure("ref-lab-guide", "정렬 헤어 가이드");
+    attachLabMediaActions(guideFig, "3 aligned hair guide", "03-aligned-guide.jpg");
+    const hairOnlyFig = mkFigure("ref-lab-hair-only", "분리된 레퍼런스 헤어");
+    attachLabMediaActions(hairOnlyFig, "4 isolated reference hair", "04-hair-only.png");
     const candidatesEl = document.createElement("div");
     candidatesEl.id = "ref-lab-candidates";
     candidatesEl.className = "ref-lab-candidates";
+    const selectedFig = mkFigure("ref-lab-selected", "Lucy로 전달된 선택 후보");
+    attachLabMediaActions(selectedFig, "5 selected → Lucy", "05-selected-preview.jpg");
+    const lucyFig = mkFigure("ref-lab-lucy", "Lucy 첫 출력");
+    attachLabMediaActions(lucyFig, "6 lucy first frame", "06-lucy-frame.jpg");
     const tableEl = document.createElement("table");
     tableEl.id = "ref-lab-spec-table";
     tableEl.className = "ref-lab-spec-table";
     const scoresEl = document.createElement("pre");
     scoresEl.id = "ref-lab-scores";
+    const diagnoseEl = document.createElement("pre");
+    diagnoseEl.id = "ref-lab-diagnose";
     const promptEl = document.createElement("pre");
     promptEl.id = "ref-lab-prompt";
-    panel.append(refFig, selfieFig, candidatesEl, tableEl, scoresEl, promptEl);
+    panel.append(
+      originalFig, maskedFig, selfieFig, guideFig, hairOnlyFig,
+      candidatesEl, selectedFig, lucyFig, tableEl, scoresEl, diagnoseEl, promptEl,
+    );
     $("stage").insertAdjacentElement("afterend", panel);
     labDebug = panel;
     return panel;
@@ -195,33 +259,46 @@ export function createReferenceFlow({
     if (!isLab) return;
     const panel = ensureLabDebug();
     if (!panel) return;
-    const refEl = panel.querySelector("#ref-lab-gemini-ref");
-    const selfieEl = panel.querySelector("#ref-lab-selfie");
+    const setSrc = (sel, url) => {
+      const el = panel.querySelector(sel);
+      if (!el) return;
+      if (url) el.src = url;
+      else el.removeAttribute("src");
+    };
+    setSrc("#ref-lab-original", referenceDataUrl);
+    setSrc("#ref-lab-masked", maskedReferenceDataUrl);
+    setSrc("#ref-lab-selfie", selfieDataUrl);
+    setSrc("#ref-lab-guide", labGuideDataUrl);
+    setSrc("#ref-lab-hair-only", labHairOnlyDataUrl);
+    setSrc("#ref-lab-selected", previewDataUrl);
+    setSrc("#ref-lab-lucy", lucyFrameDataUrl);
     const candidatesEl = panel.querySelector("#ref-lab-candidates");
     const tableEl = panel.querySelector("#ref-lab-spec-table");
     const scoresEl = panel.querySelector("#ref-lab-scores");
+    const diagnoseEl = panel.querySelector("#ref-lab-diagnose");
     const promptEl = panel.querySelector("#ref-lab-prompt");
-    if (maskedReferenceDataUrl) refEl.src = maskedReferenceDataUrl;
-    else refEl.removeAttribute("src");
-    if (selfieDataUrl) selfieEl.src = selfieDataUrl;
-    else selfieEl.removeAttribute("src");
     candidatesEl.innerHTML = "";
     if (previewCandidates.length) {
       for (const cand of previewCandidates) {
         const wrap = document.createElement("figure");
         wrap.className = "ref-lab-candidate ref-lab-shot";
         const img = document.createElement("img");
-        img.alt = `candidate ${cand.index}`;
+        img.alt = `gemini candidate ${cand.index}`;
         if (cand.image) img.src = cand.image;
         wrap.append(img);
-        attachLabCopyButton(
+        const fatal = Array.isArray(cand.fatals) && cand.fatals.length
+          ? ` fail=${cand.fatals.map((f) => f.field).join(",")}`
+          : "";
+        const visual = cand.visual ? ` visual=${cand.visual.pass ? "pass" : "fail"}` : "";
+        attachLabMediaActions(
           wrap,
-          `#${cand.index}${cand.selected ? " ← selected" : ""} match=${cand.hairMatch}/4 changed=${cand.changed ? "yes" : "no"}`,
+          `Gemini #${cand.index}${cand.selected ? " ← selected" : ""} route=${cand.route || "?"} match=${cand.hairMatch}/9 pass=${cand.pass ? "yes" : "no"}${fatal}${visual}`,
+          `candidate-${cand.index}.jpg`,
         );
         candidatesEl.append(wrap);
       }
     }
-    const fields = ["front", "forehead", "sides", "top"];
+    const fields = ["front", "forehead", "sides", "top", "texture", "bangs", "part", "volume", "length"];
     const rows = [
       ["", ...fields],
       ["ref", ...fields.map((f) => previewReferenceCore?.[f] ?? "—")],
@@ -237,14 +314,25 @@ export function createReferenceFlow({
       const tag = i === 0 ? "th" : "td";
       return `<tr>${row.map((cell) => `<${tag}>${cell}</${tag}>`).join("")}</tr>`;
     }).join("");
+    const reasonText = previewFailReasons.length ? `\n${previewFailReasons.join("\n")}` : "";
     if (previewScores.length || previewCandidates.length) {
       const lines = (previewCandidates.length ? previewCandidates : previewScores).map((s) => (
-        `#${s.index} match=${s.hairMatch}/4 changed=${s.changed ? "yes" : "no"} pass=${s.pass ? "yes" : "no"} a${s.attempt ?? "?"}${s.selected || s.index === previewSelectedIndex ? " ← selected" : ""}`
+        `#${s.index} match=${s.hairMatch}/9 pass=${s.pass ? "yes" : "no"} route=${s.route || "?"} a${s.attempt ?? "?"}${s.selected || s.index === previewSelectedIndex ? " ← selected" : ""}`
       ));
-      scoresEl.textContent = `attempts=${previewAttempts} selected=#${previewSelectedIndex ?? "?"}\n${lines.join("\n")}`;
+      scoresEl.textContent = `attempts=${previewAttempts} selected=#${previewSelectedIndex ?? "none"} guide=${guideUsed ? "on" : "off"} (${guideReason || "n/a"})${reasonText}\n${lines.join("\n")}`;
     } else {
-      scoresEl.textContent = "";
+      scoresEl.textContent = reasonText;
     }
+    const selected = previewCandidates.find((c) => c.selected) || previewCandidates.find((c) => c.index === previewSelectedIndex);
+    const geminiWrong = previewCandidates.length > 0 && previewCandidates.every((c) => !c.pass);
+    const selectedLooksWrong = selected && !selected.pass;
+    const lucyDrift = Boolean(lucyFrameDataUrl && previewDataUrl && lucyFrameDataUrl !== previewDataUrl);
+    diagnoseEl.textContent = [
+      `first-failure-hint: ${geminiWrong || selectedLooksWrong ? "GEMINI candidate(s) already mismatch reference" : (lucyFrameDataUrl ? "compare Lucy frame vs selected preview" : "await Lucy frame")}`,
+      `guideReason=${guideReason || "n/a"} guideUsed=${guideUsed}`,
+      selected ? `selected route=${selected.route || "?"} visual=${selected.visual?.pass ? "pass" : "fail"} fatals=${(selected.fatals || []).map((f) => f.field).join(",") || "none"}` : "no selected candidate",
+      lucyDrift ? "lucy frame captured — visually compare stage 5 vs 6 in this panel" : "lucy frame not yet captured",
+    ].join("\n");
     promptEl.textContent = prompt ?? lastLucyPrompt;
   }
 
@@ -309,7 +397,7 @@ export function createReferenceFlow({
     $("connection-state").hidden = true;
     $("expected-chip").hidden = true;
     $("resolution").hidden = true;
-    showLabDebug(next === "live");
+    showLabDebug(next === "live" || (isLab && previewCandidates.length > 0));
     if (next === "capture" || next === "generating" || next === "live") hideBanner();
     updateButtons();
   }
@@ -323,6 +411,13 @@ export function createReferenceFlow({
     previewCandidates = [];
     previewPersonCore = null;
     previewReferenceCore = null;
+    previewFailReasons = [];
+    lucyFrameDataUrl = "";
+    labGuideDataUrl = "";
+    labHairOnlyDataUrl = "";
+    labEditMaskDataUrl = "";
+    guideReason = "";
+    guideUsed = false;
     previewFailCount = 0;
   }
 
@@ -515,22 +610,54 @@ export function createReferenceFlow({
       throw error;
     }
     const opts = labOptions();
+    const guidePrep = await prepareHairGuide({
+      referenceDataUrl,
+      selfieDataUrl,
+    });
+    labGuideDataUrl = guidePrep.ok ? guidePrep.guide : "";
+    labHairOnlyDataUrl = guidePrep.ok ? guidePrep.hairOnly : "";
+    labEditMaskDataUrl = guidePrep.ok ? guidePrep.editMask : "";
+    guideReason = guidePrep.reason || "";
+    guideUsed = Boolean(guidePrep.ok);
+    const payload = {
+      person: selfieDataUrl,
+      reference: maskedReferenceDataUrl,
+      spec: hairSpec,
+      labDebug: isLab,
+      editModel: opts.editmodel || undefined,
+      guideReason,
+    };
+    if (guidePrep.ok) {
+      payload.guide = guidePrep.guide;
+      payload.hairOnly = guidePrep.hairOnly;
+      payload.editMask = guidePrep.editMask;
+    }
     const response = await fetch("/hair-preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        person: selfieDataUrl,
-        reference: maskedReferenceDataUrl,
-        spec: hairSpec,
-        labDebug: isLab,
-        editModel: opts.editmodel || undefined,
-      }),
+      body: JSON.stringify(payload),
     });
     const body = await response.json().catch(() => ({}));
     if (uploadSeq !== uploadAtStart) return null;
+    previewScores = Array.isArray(body.scores) ? body.scores : [];
+    previewAttempts = Number(body.attempts) || 0;
+    previewSelectedIndex = Number.isInteger(body.selectedIndex) ? body.selectedIndex : null;
+    previewCandidates = Array.isArray(body.candidates) ? body.candidates : [];
+    previewPersonCore = body.person || null;
+    previewReferenceCore = body.reference || null;
+    previewFailReasons = Array.isArray(body.failReasons) ? body.failReasons : [];
+    if (typeof body.guideUsed === "boolean") guideUsed = body.guideUsed;
+    if (body.guideReason) guideReason = body.guideReason;
     if (response.status === 429) {
       const error = new Error(body.error || "오늘 체험 횟수를 모두 사용했어요.");
       error.status = 429;
+      throw error;
+    }
+    if (response.status === 422) {
+      updateLabDebug();
+      showLabDebug(true);
+      const error = new Error(body.error || "맞는 헤어 미리보기를 만들지 못했어요. 다시 시도해 주세요.");
+      error.status = 422;
       throw error;
     }
     if (!response.ok) {
@@ -539,13 +666,7 @@ export function createReferenceFlow({
       throw error;
     }
     previewDataUrl = body.image;
-    previewScores = Array.isArray(body.scores) ? body.scores : [];
-    previewAttempts = Number(body.attempts) || 0;
-    previewSelectedIndex = Number.isInteger(body.selectedIndex) ? body.selectedIndex : null;
-    previewCandidates = Array.isArray(body.candidates) ? body.candidates : [];
-    previewPersonCore = body.person || null;
-    previewReferenceCore = body.reference || null;
-    // faceRestore kept in public/faceRestore.js but disabled — Lucy uses Gemini output as-is.
+    previewFailReasons = [];
     previewBlob = await (await fetch(previewDataUrl)).blob();
     previewFailCount = 0;
     updateLabDebug();
@@ -586,6 +707,13 @@ export function createReferenceFlow({
         onRemote: (remote) => {
           if (!isActive() || active.stopped || uiState !== "live") return;
           showLiveStream(remote, { remote: true });
+          if (isLab && !lucyFrameDataUrl) {
+            void grabLabStreamFrame(remote).then((url) => {
+              if (!url || lucyFrameDataUrl) return;
+              lucyFrameDataUrl = url;
+              updateLabDebug();
+            });
+          }
         },
         onError: (message) => {
           if (!isActive()) return;

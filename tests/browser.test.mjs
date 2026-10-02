@@ -143,6 +143,11 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
         lastDescribeImage = Buffer.from(image);
         return { ok: true, spec: describeSpec };
       },
+      compare: async () => ({
+        frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
+        silhouette: true, sideLength: true, color: true, identity: true, scene: true,
+        uncertain: false, reasons: [], pass: true,
+      }),
     },
     hairEditor: {
       edit: async ({ reference, features }) => {
@@ -338,11 +343,15 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await labPage.locator("#ref-start").click();
   await expect(labPage.locator("#ref-live-bar")).toBeVisible({ timeout: 30000 });
   await expect(labPage.locator("#ref-lab-debug")).toBeVisible();
-  await expect(labPage.locator("#ref-lab-gemini-ref")).toHaveAttribute("src", /data:image/);
+  await expect(labPage.locator("#ref-lab-original")).toHaveAttribute("src", /data:image/);
+  await expect(labPage.locator("#ref-lab-masked")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-selfie")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator(".ref-lab-candidate img").first()).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-spec-table")).toContainText("selfie");
   await expect(labPage.locator("#ref-lab-spec-table")).toContainText("front");
+  await expect(labPage.locator("#ref-lab-spec-table")).toContainText("texture");
+  await expect(labPage.locator("#ref-lab-selected")).toHaveAttribute("src", /data:image/);
+  await expect(labPage.locator("#ref-lab-diagnose")).toContainText("first-failure-hint");
   await expect(labPage.locator("#ref-lab-prompt")).toHaveText(IMAGE_HAIR_PROMPT);
 
   const nativePage = await context.newPage();
@@ -362,7 +371,14 @@ test("browser: / and /lab (no params) share hair-preview reference and Lucy init
     logger: { error() {} },
     decart: { tokens: { create: async () => ({ apiKey: "parity-token" }) } },
     store: { saveLead: async () => ({ imageFileId: "x" }) },
-    hairVision: { describe: async () => ({ ok: true, spec: describeSpec }) },
+    hairVision: {
+      describe: async () => ({ ok: true, spec: describeSpec }),
+      compare: async () => ({
+        frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
+        silhouette: true, sideLength: true, color: true, identity: true, scene: true,
+        uncertain: false, reasons: [], pass: true,
+      }),
+    },
     hairEditor: { edit: async () => ({ buffer: previewJpeg, mediaType: "image/jpeg" }) },
   });
   const server = await new Promise((resolve, reject) => {
@@ -429,7 +445,14 @@ test("browser: reference UI state screenshots", { timeout: 120000 }, async (t) =
     logger: { error() {} },
     decart: { tokens: { create: async () => ({ apiKey: "shot-token" }) } },
     store: { saveLead: async () => ({ imageFileId: "x" }) },
-    hairVision: { describe: async () => ({ ok: true, spec: describeSpec }) },
+    hairVision: {
+      describe: async () => ({ ok: true, spec: describeSpec }),
+      compare: async () => ({
+        frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
+        silhouette: true, sideLength: true, color: true, identity: true, scene: true,
+        uncertain: false, reasons: [], pass: true,
+      }),
+    },
     hairEditor: { edit: async () => ({ buffer: previewJpeg, mediaType: "image/jpeg" }) },
   });
   const server = await new Promise((resolve, reject) => {

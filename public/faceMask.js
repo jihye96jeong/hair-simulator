@@ -18,6 +18,8 @@ export const EYE_INDICES = Object.freeze([
 
 export const MASK_FILL = "#808080";
 export const EYEBROW_EYE_GAP_FACTOR = 0.3;
+/** Pull oval ear/temple points inward so bangs, hairline, and side hair stay visible. */
+export const MASK_SIDE_INSET = 0.22;
 export const FACE_COUNT_ERROR = "얼굴이 한 명만 정면으로 나온 사진을 올려주세요";
 
 export const MEDIAPIPE_WASM_PATH = "/vendor/mediapipe/wasm";
@@ -62,7 +64,14 @@ export function buildFaceMaskPolygon(landmarks, width, height) {
   }
   const points = landmarksToPixels(landmarks, width, height);
   const topY = computeMaskTopY(points);
-  const oval = FACE_OVAL_RING.map((i) => points[i]);
+  const rawOval = FACE_OVAL_RING.map((i) => points[i]);
+  const minX = Math.min(...rawOval.map((p) => p.x));
+  const maxX = Math.max(...rawOval.map((p) => p.x));
+  const cx = (minX + maxX) / 2;
+  const oval = rawOval.map((p) => ({
+    x: cx + (p.x - cx) * (1 - MASK_SIDE_INSET),
+    y: p.y,
+  }));
   const polygon = [];
   for (let i = 0; i < oval.length; i++) {
     const a = oval[i];

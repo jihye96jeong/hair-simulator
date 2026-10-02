@@ -70,7 +70,7 @@ test("buildEditFeatures uses only sanitized enum phrases", () => {
   }));
   assert.equal(
     features,
-    "Front hair lifted up, forehead fully exposed, sides above the ears, short top with messy textured strands, dark brown color.",
+    "Front hair lifted up, forehead fully exposed, light see-through bangs, no part, shoulder-length overall length, sides above the ears, short top, natural volume, messy textured strands, dark brown color.",
   );
   for (const front of HAIR_FRONTS) {
     for (const forehead of HAIR_FOREHEADS) {
@@ -102,10 +102,10 @@ test("buildHairPrompt stays within 750 characters and never uses Do not", () => 
   }
 });
 
-test("IMAGE_HAIR_PROMPT has no structured hair-spec sentences", () => {
-  assert.ok(IMAGE_HAIR_PROMPT.includes("reference image"));
+test("IMAGE_HAIR_PROMPT locks the attached preview without spec enums", () => {
+  assert.ok(IMAGE_HAIR_PROMPT.includes("attached photo"));
   assert.ok(IMAGE_HAIR_PROMPT.includes("Keep the person's face"));
-  assert.equal(IMAGE_HAIR_PROMPT.includes("bangs"), false);
+  assert.ok(IMAGE_HAIR_PROMPT.includes("Do not restyle"));
   assert.equal(IMAGE_HAIR_PROMPT.includes("see_through"), false);
   assert.equal(IMAGE_HAIR_PROMPT.includes("layered cut"), false);
   assert.equal(IMAGE_HAIR_PROMPT.includes("ash brown"), false);

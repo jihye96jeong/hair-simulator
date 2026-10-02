@@ -40,6 +40,11 @@ function createPassVision() {
       if (calls === 1) return { ok: true, spec: personPreviewSpec };
       return { ok: true, spec: previewSpec };
     },
+    compare: async () => ({
+      frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
+      silhouette: true, sideLength: true, color: true, identity: true, scene: true,
+      uncertain: false, reasons: [], pass: true,
+    }),
   };
 }
 async function fixture(t, options = {}) {
@@ -335,6 +340,11 @@ test("/hair-preview contest selects, retries, falls back, and rejects bad vision
         i += 1;
         return { ok: true, spec };
       },
+      compare: async () => ({
+        frontDirection: true, part: true, foreheadExposure: true, texture: true, volume: true,
+        silhouette: true, sideLength: true, color: true, identity: true, scene: true,
+        uncertain: false, reasons: [], pass: true,
+      }),
     };
   }
 
@@ -369,7 +379,7 @@ test("/hair-preview contest selects, retries, falls back, and rejects bad vision
     assert.equal(body.image, `data:image/jpeg;base64,${c.toString("base64")}`);
   }
 
-  // No passers after retry → highest hairMatch fallback
+  // No passers after retry → 422, no Lucy image
   {
     let n = 0;
     const bufs = [a, b, c, d];
@@ -379,10 +389,13 @@ test("/hair-preview contest selects, retries, falls back, and rejects bad vision
       hairEditor: { edit: async () => ({ buffer: bufs[n++], mediaType: "image/jpeg" }) },
       hairVision: visionFromSpecs([none, none, oneMatch, none]),
     });
-    const body = await (await f.post("/hair-preview", { person, reference, spec: previewSpec })).json();
+    const res = await f.post("/hair-preview", { person, reference, spec: previewSpec, labDebug: true });
+    assert.equal(res.status, 422);
+    const body = await res.json();
     assert.equal(body.attempts, 2);
-    assert.equal(body.selectedIndex, 2);
-    assert.equal(body.image, `data:image/jpeg;base64,${c.toString("base64")}`);
+    assert.equal(body.image, undefined);
+    assert.ok(Array.isArray(body.failReasons));
+    assert.ok(Array.isArray(body.candidates));
   }
 
   // Vision failure → 502; quota still one reservation then release

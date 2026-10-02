@@ -374,7 +374,15 @@ button.ref-change {
   display: grid;
   gap: 4px;
 }
-.ref-lab-copy {
+.ref-lab-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.ref-lab-copy,
+.ref-lab-download {
+  display: grid;
+  place-items: center;
   width: 100%;
   border: 0;
   border-radius: 999px;
@@ -384,8 +392,16 @@ button.ref-change {
   font: inherit;
   font-size: 10px;
   cursor: pointer;
+  text-decoration: none;
 }
-.ref-lab-copy:hover {
+.ref-lab-download {
+  background: #1c2030;
+}
+.ref-lab-debug {
+  max-height: min(48vh, 420px);
+}
+.ref-lab-copy:hover,
+.ref-lab-download:hover {
   background: #3a4254;
 }
 .ref-lab-candidate figcaption {
