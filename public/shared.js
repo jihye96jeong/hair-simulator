@@ -3,6 +3,8 @@ export const REGIONS = ["서울", "부산", "대구", "인천", "광주", "대�
 export const AREAS = ["hairline", "crown"];
 export const DENSITIES = ["partial", "1k", "2k"];
 export const COMBO_KEYS = [...DENSITIES, ...DENSITIES.map((density) => `crown_${density}`)];
+export const EXPERIENCE_TYPES = ["preset", "reference"];
+export const REFERENCE_SESSION_KEY = "reference";
 export const END_REASONS = ["cap", "hidden", "pagehide", "manual", "capture", "error", "disconnected"];
 export function normalizePhone(value) {
   if (typeof value !== "string" || !/^[\d\s-]+$/.test(value)) return "";

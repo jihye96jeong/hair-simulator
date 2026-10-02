@@ -103,6 +103,23 @@ test("rapid select drains to the latest preset without reconnect", async () => {
   assert.equal(f.counts().disconnects, 0);
   f.session.stop("manual");
 });
+test("setHairReference forces a new set even when logical combo matches", async () => {
+  const f = fixture();
+  f.session.experienceType = "reference";
+  f.session.combo = "reference";
+  await f.session.start(f.stream, token, async () => f.rt, {});
+  const first = new Blob(["a"]);
+  const second = new Blob(["b"]);
+  assert.equal(await f.session.setHairReference(first, "prompt-a"), true);
+  assert.equal(await f.session.setHairReference(second, "prompt-b"), true);
+  assert.equal(f.sets.length, 2);
+  assert.equal(f.sets[1].image, second);
+  assert.equal(f.sets[1].prompt, "prompt-b");
+  assert.match(f.session.combo, /^reference:/);
+  f.session.stop("manual");
+  assert.equal(f.reports[0].combo, "reference");
+  assert.equal(f.reports[0].experienceType, "reference");
+});
 test("hiding during token issuance prevents a late connection and reports once", async () => {
   const f = fixture();
   let resolveToken;

@@ -2,12 +2,26 @@ import { CAP_SECONDS } from "./shared.js";
 
 /**
  * Decart lucy-2.5 realtime session lifecycle.
- * Hair preset changes use rt.set() on the same connection (no reconnect).
- * Rapid select() calls drain to the latest pending preset.
+ * Preset and reference updates use rt.set() on the same connection (no reconnect).
+ * Rapid select() / setHairReference() calls drain to the latest pending state.
  */
 export class RealtimeSession {
-  constructor({ mode, anchor, combo, onState = () => {}, onTick = () => {}, onStop = () => {}, onRemote = () => {}, onError = () => {}, report = () => {}, now = () => performance.now(), timers = globalThis, logger = console }) {
-    Object.assign(this, { mode, anchor, combo, onState, onTick, onStop, onRemote, onError, report, now, timers, logger });
+  constructor({
+    mode,
+    anchor,
+    combo,
+    experienceType = "preset",
+    onState = () => {},
+    onTick = () => {},
+    onStop = () => {},
+    onRemote = () => {},
+    onError = () => {},
+    report = () => {},
+    now = () => performance.now(),
+    timers = globalThis,
+    logger = console,
+  }) {
+    Object.assign(this, { mode, anchor, combo, experienceType, onState, onTick, onStop, onRemote, onError, report, now, timers, logger });
     this.stopped = false;
     this.state = "connecting";
     this.billedSeconds = 0;
@@ -21,6 +35,7 @@ export class RealtimeSession {
     this.setting = false;
     this.desired = null;
     this.settingPromise = null;
+    this.revision = 0;
   }
 
   async start(stream, tokenRequest, connect, options) {
@@ -37,7 +52,6 @@ export class RealtimeSession {
         onRemoteStream: (remote) => { if (!this.stopped) this.onRemote(remote); },
         onConnectionChange: (state) => this.connectionChange(state),
       }, result.token);
-      // SDK connect has no AbortSignal. Dispose a late result before using it.
       if (this.stopped) { rt.disconnect(); return; }
       this.rt = rt;
       rt.on("connectionChange", (state) => this.connectionChange(state));
@@ -64,7 +78,6 @@ export class RealtimeSession {
 
   tick(seconds) {
     if (this.stopped || !Number.isFinite(seconds) || seconds < 0) return;
-    // Preserve total usage if the provider's tick counter resets on reconnect.
     if (this.lastTick !== null && seconds < this.lastTick) {
       this.tickOffset += this.lastTick;
       this.logger.info("generationTick reset", { previousSeconds: this.lastTick, seconds, state: this.state });
@@ -76,10 +89,13 @@ export class RealtimeSession {
     if (this.billedSeconds >= CAP_SECONDS) this.stop("cap");
   }
 
-  /** Apply hair reference on the live session. Rapid calls share one drain; latest key wins. */
-  async select(key, state) {
+  /**
+   * Apply a full SetInput on the live session.
+   * `force` applies even when the logical key matches (needed for reference image swaps).
+   */
+  async select(key, state, { force = false } = {}) {
     if (this.stopped || !this.rt || !["connected", "generating"].includes(this.state)) return false;
-    this.desired = { key, state };
+    this.desired = { key, state, force };
     if (this.settingPromise) return this.settingPromise;
     this.setting = true;
     this.settingPromise = (async () => {
@@ -87,7 +103,7 @@ export class RealtimeSession {
         while (this.desired && !this.stopped) {
           const next = this.desired;
           this.desired = null;
-          if (next.key === this.combo) continue;
+          if (!next.force && next.key === this.combo) continue;
           await this.rt.set(next.state);
           if (this.stopped) return false;
           if (this.desired) continue;
@@ -106,14 +122,11 @@ export class RealtimeSession {
     return this.settingPromise;
   }
 
-  /** Same-session hair reference update (HairSessionHandle.setHairReference). */
-  async setHairReference(image, prompt) {
-    return this.select(this.combo, { prompt, image, enhance: true });
-  }
-
-  async clearHairReference() {
-    if (this.stopped || !this.rt) return;
-    await this.rt.set({ image: null });
+  /** Same-session reference image update. Always forces set() via a new revision key. */
+  async setHairReference(image, prompt, { enhance = true } = {}) {
+    const revision = ++this.revision;
+    const key = `reference:${revision}`;
+    return this.select(key, { prompt, image, enhance }, { force: true });
   }
 
   disconnect() { this.stop("manual"); }
@@ -130,7 +143,18 @@ export class RealtimeSession {
     try { rt?.disconnect(); } catch { this.logger.error("disconnect 실패"); }
     for (const track of this.stream?.getTracks() || []) track.stop();
     this.state = "disconnected";
-    this.summary = { reason, billedSeconds: this.billedSeconds, wallSeconds: Number(this.wallSeconds().toFixed(3)), switches: this.switches, mode: this.mode, anchor: this.anchor, combo: this.combo, captured: this.captured };
+    const reportCombo = this.experienceType === "reference" ? "reference" : this.combo;
+    this.summary = {
+      reason,
+      billedSeconds: this.billedSeconds,
+      wallSeconds: Number(this.wallSeconds().toFixed(3)),
+      switches: this.switches,
+      mode: this.mode,
+      anchor: this.anchor,
+      combo: reportCombo,
+      captured: this.captured,
+      experienceType: this.experienceType,
+    };
     this.logger.info("session-end", this.summary);
     this.sendReport();
     this.onStop(this.summary);

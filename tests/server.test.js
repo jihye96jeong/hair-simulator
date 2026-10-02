@@ -115,6 +115,14 @@ test("beacon text/plain body accepted; duplicate and invalid reports handled", a
   assert.equal((await f.post("/session-end", body)).status, 204);
   assert.equal((await f.post("/session-end", { ...body, sessionId: "unknown" })).status, 400);
 });
+test("reference experienceType session-end is accepted without allowing arbitrary combo", async (t) => {
+  const f = await fixture(t);
+  const { sessionId } = await (await f.post("/token")).json();
+  const body = { sessionId, reason: "capture", billedSeconds: 8, wallSeconds: 9, switches: 2, combo: "reference", captured: true, experienceType: "reference", mode: "ref", anchor: "on" };
+  assert.equal((await f.post("/session-end", body)).status, 204);
+  assert.equal((await f.post("/session-end", { ...body, combo: "partial" })).status, 400);
+  assert.equal((await f.post("/session-end", { ...body, experienceType: "preset", combo: "reference" })).status, 400);
+});
 test("CLI entry point starts the app and serves the page without configured keys", { timeout: 10000 }, async (t) => {
   const portFinder = createServer();
   await new Promise((resolve, reject) => { portFinder.listen(0, "127.0.0.1", resolve); portFinder.on("error", reject); });

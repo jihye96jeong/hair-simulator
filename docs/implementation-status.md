@@ -4,20 +4,23 @@
 
 참고 클론 `change_ai/`(요청문의 `change_ai-main`에 해당, 수정하지 않음)의 카메라·토큰·세션 패턴을 STEP 01 범위에 맞춰 현재 스택에 재정렬했습니다. 카메라 ideal은 `models.realtime("lucy-2.5")` width/height/fps, 토큰 `expiresIn: 300`, 같은 연결에서 `set()` 전환(빠른 클릭은 최신 선택 유지)입니다.
 
+추가로 **레퍼런스 헤어** 탭을 넣었습니다. `change_ai`의 `hairReference` 전처리·헤어 전용 프롬프트·같은 세션 이미지 교체를 가져와, FaceDetector 실패 시 수동 얼굴 보호와 `experienceType: reference` 종료 기록을 보강했습니다. 기존 모수 탭·리드·Drive 흐름은 유지합니다.
+
 ## 구현 파일
 
 | 파일 | 역할 |
 | --- | --- |
 | `package.json`, `package-lock.json`, `.env.example`, `.gitignore` | 실행, 의존성, 환경변수, 키·산출물 제외 |
 | `server.js`, `lib/config.js`, `lib/quota.js` | 정적 앱, 토큰, 일별 발급 상한, 리드·세션 API |
-| `lib/google-store.js`, `lib/validation.js` | 비공개 Drive 이미지 저장, 동의·입력 검증 |
+| `lib/google-store.js`, `lib/validation.js` | 비공개 Drive 이미지 저장, 동의·입력·experienceType 검증 |
 | `lib/browser-vendor.js` | SDK·의존성을 CDN·빌드 없이 제공 |
 | `lib/assets.js`, `scripts/create-placeholders.js`, `public/assets/*` | 헤어라인·정수리 PNG 원본 6장, 예비 이미지 생성, 실제 에셋 감지 |
-| `public/index.html`, `styles.css`, `app.js` | 모바일 사용자 흐름, `/lab` 검증 흐름 |
-| `public/combos.js`, `shared.js`, `session.js`, `capture.js` | 전체 상태 전환, 세션 종료·시간 제한, 캡처 |
+| `public/index.html`, `styles.css`, `app.js` | 탭 UI, 모수 흐름, `/lab` 검증 흐름 |
+| `public/hairReference.js`, `referenceFlow.js` | 레퍼런스 전처리·수동 보호·레퍼런스 탭 수명주기 |
+| `public/combos.js`, `shared.js`, `session.js`, `camera.js`, `capture.js` | 조합·세션·카메라·캡처 |
 | `scripts/check-prompts.js`, `scripts/setup-google.js` | 프롬프트 검사, Drive 폴더 확인 |
-| `tests/*.test.js`, `tests/browser.test.mjs` | HTTP·세션·Google 대역·Chrome 검증 |
-| `README.md` | 실행, Google 준비, HTTPS 터널, 실제 검증 방법 |
+| `tests/*.test.js`, `tests/browser.test.mjs` | HTTP·세션·레퍼런스·Chrome 검증 |
+| `README.md` | 실행, 탭 사용법, Google 준비, 수동 검증 항목 |
 
 ## 완료 기준별 결과
 
@@ -45,7 +48,7 @@ Google Drive 연동과 유료 연결은 자격증명 없이 대역으로 검증�
 
 실행 환경은 Node 24.2.0이며, 의존성의 Node 20 지원 조건에 맞춰 최소 버전은 20.9.0입니다. 이미지 저장은 Drive 전용 패키지 `@googleapis/drive` 22를 사용합니다. 프롬프트·HTTP·세션·Drive·Chrome 검증을 아래 명령으로 실행합니다.
 
-정수리 추가 검증: Node·Chrome 테스트 총 22개, 프롬프트 검사 6개, JavaScript 구문 검사 통과. 정수리 3개 원본 이미지의 실제 Blob 전달, 같은 연결에서 부위·모수 전환, 저장 조건과 종료 기록, 이미지 누락 시 처리까지 대역으로 확인했습니다. 기존 Python 테스트 1개 및 Ruff 검사는 이전 변경에서 통과했습니다. 지정한 외부 저장용 환경변수 없이 CLI 서버 시작과 API 흐름도 확인했습니다.
+정수리·레퍼런스 탭 검증: Node 테스트와 Chrome 브라우저 테스트를 실행합니다. 레퍼런스 업로드 검증, 수동/자동 얼굴 보호, 같은 연결 `setHairReference`, 탭 전환 cleanup, `experienceType: reference` 종료 기록을 대역으로 확인했습니다. 실제 Decart 변환 품질·얼굴 보존은 API 키 기반 수동 확인이 남습니다.
 
 ```bash
 npm run check:prompts
