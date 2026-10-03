@@ -8,6 +8,7 @@ import {
   HAIR_VOLUMES,
   IMAGE_HAIR_PROMPT,
   buildHairPrompt,
+  buildImageHairPrompt,
   describeHairKo,
   sanitizeHairSpec,
 } from "../public/hairPrompt.js";
@@ -81,6 +82,38 @@ test("IMAGE_HAIR_PROMPT locks the attached preview without spec enums", () => {
   assert.equal(IMAGE_HAIR_PROMPT.includes("ash brown"), false);
   assert.equal(IMAGE_HAIR_PROMPT.includes("s_wave"), false);
   assert.equal(IMAGE_HAIR_PROMPT.includes("Change only the hair"), false);
+});
+
+test("buildImageHairPrompt states the length in words before locking the photo", () => {
+  for (const length of HAIR_LENGTHS) {
+    for (const bangs of HAIR_BANGS) {
+      const prompt = buildImageHairPrompt(spec({ length, bangs }));
+      assert.ok(prompt.includes("Keep the hairstyle already shown in this attached photo"), length);
+      assert.ok(prompt.endsWith("Do not regenerate, beautify, or replace the face."), length);
+      assert.ok(prompt.startsWith("The hair is "), length);
+      assert.ok(prompt.length <= 1000, prompt);
+      assert.equal(prompt.includes("see_through"), false);
+      assert.equal(prompt.includes("s_wave"), false);
+      assert.equal(prompt.includes("fully_exposed"), false);
+      assert.equal(prompt.includes("parted_curtain"), false);
+    }
+  }
+  assert.ok(buildImageHairPrompt(spec({ length: "chest" })).includes("reaches the chest"));
+  assert.ok(buildImageHairPrompt(spec({ length: "shoulder" })).includes("shoulder-length hair"));
+  assert.ok(buildImageHairPrompt(spec({ texture: "s_wave" })).includes("soft S-shaped waves"));
+  // No bangs is said outright (Lucy otherwise copies the person's own fringe from the video),
+  // and the lock sentence stops asking to keep a "fringe".
+  const noBangs = buildImageHairPrompt(spec({ bangs: "none", part: "center", front: "parted_curtain", forehead: "fully_exposed" }));
+  assert.ok(noBangs.includes("The front: no bangs at all, the forehead is fully exposed, parted in the center, the front hair opens like a curtain"));
+  assert.equal(noBangs.includes("fringe"), false);
+  assert.ok(noBangs.includes("absence of bangs"));
+  const fullBangs = buildImageHairPrompt(spec({ bangs: "full", forehead: "covered" }));
+  assert.ok(fullBangs.includes("The front: full bangs, the forehead is covered"));
+  assert.ok(fullBangs.includes("fringe"));
+  assert.ok(fullBangs.includes("when the head turns"));
+  assert.ok(fullBangs.includes("Never switch back to the hair visible on the live camera"));
+  assert.equal(buildImageHairPrompt(null), IMAGE_HAIR_PROMPT);
+  assert.equal(buildImageHairPrompt({ length: "medium" }), IMAGE_HAIR_PROMPT);
 });
 
 test("describeHairKo omits none bangs and part", () => {

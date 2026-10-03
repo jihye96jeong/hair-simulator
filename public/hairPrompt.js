@@ -3,6 +3,74 @@ export const REFERENCE_ENHANCE = false;
 /** Lucy prompt when a Gemini preview image is attached. Lock the attached preview; do not restyle. */
 export const IMAGE_HAIR_PROMPT = "Keep the hairstyle already shown in this attached photo, including the front hair direction, fringe, part, forehead coverage, side length, top silhouette, texture, volume, and color. Do not restyle or reinterpret the hair. The hair grows from the person's own scalp and moves naturally with their head. Keep the person's face, eyes, eyebrows, nose, mouth, jaw, ears, neck, skin, expression, clothing, background, and identity unchanged. Do not regenerate, beautify, or replace the face.";
 
+/**
+ * Where the hair ends, spelled out for the realtime model. Lucy reads the attached photo for
+ * the look but tends to shorten long hair toward the shoulders; the overall length is the one
+ * attribute it must be told in words (with the landmark it reaches).
+ */
+const LENGTH_REACH_EN = {
+  buzz: "a buzz cut, hair cropped close to the scalp all around",
+  very_short: "very short hair that stays above the ears and off the neck",
+  short: "short hair ending around the ears and above the collar",
+  chin: "chin-length hair whose ends line up with the jaw",
+  shoulder: "shoulder-length hair whose ends rest on the shoulders",
+  chest: "long hair that falls well below the shoulders and reaches the chest",
+  long: "very long hair that falls far past the shoulders, down to the chest and beyond",
+};
+
+const PART_FRONT_EN = {
+  center: "parted in the center",
+  side: "parted to one side",
+  slicked_back: "slicked back off the face",
+};
+const FRONT_EN = {
+  parted_curtain: "the front hair opens like a curtain and falls down the sides of the face",
+  swept_to_side: "the front hair is swept to the side",
+  lifted_up: "the front hair is lifted up and back off the forehead",
+  falls_down: "the front hair falls down over the forehead",
+};
+const FOREHEAD_EN = {
+  fully_exposed: "the forehead is fully exposed",
+  partly_exposed: "the forehead is partly visible",
+  covered: "the forehead is covered",
+};
+
+/**
+ * The front of the hairstyle in words. Lucy works on the live video, where the person's own
+ * fringe is visible, and copies it unless told plainly what the front looks like; "no bangs"
+ * has to be said, not shown.
+ */
+export function describeFront(spec) {
+  const parts = [];
+  if (spec.bangs === "none") {
+    parts.push("no bangs at all");
+    if (FOREHEAD_EN[spec.forehead]) parts.push(FOREHEAD_EN[spec.forehead]);
+    if (PART_FRONT_EN[spec.part]) parts.push(PART_FRONT_EN[spec.part]);
+    if (FRONT_EN[spec.front] && spec.front !== "falls_down") parts.push(FRONT_EN[spec.front]);
+  } else {
+    if (BANGS_EN[spec.bangs]) parts.push(BANGS_EN[spec.bangs]);
+    if (FOREHEAD_EN[spec.forehead]) parts.push(FOREHEAD_EN[spec.forehead]);
+    if (PART_FRONT_EN[spec.part]) parts.push(PART_FRONT_EN[spec.part]);
+  }
+  return parts.join(", ");
+}
+
+/**
+ * Lucy prompt for an attached preview plus the analysed spec: length and front are stated
+ * first and in words (the photo alone is not enough for them), then the photo is locked as
+ * the look.
+ */
+export function buildImageHairPrompt(spec) {
+  if (!spec || !LENGTH_REACH_EN[spec.length]) return IMAGE_HAIR_PROMPT;
+  const texture = TEXTURE_EN[spec.texture] ? `, ${TEXTURE_EN[spec.texture]}` : "";
+  const front = describeFront(spec);
+  const frontSentence = front ? ` The front: ${front}.` : "";
+  const lock = spec.bangs === "none"
+    ? IMAGE_HAIR_PROMPT.replace("fringe, ", "absence of bangs, ")
+    : IMAGE_HAIR_PROMPT;
+  return `The hair is ${LENGTH_REACH_EN[spec.length]}${texture}, exactly as long as in the attached photo.${frontSentence} Keep that length and that front in every frame, including when the head turns. Never switch back to the hair visible on the live camera. ${lock}`;
+}
+
 export const HAIR_LENGTHS = Object.freeze(["buzz", "very_short", "short", "chin", "shoulder", "chest", "long"]);
 export const HAIR_BANGS = Object.freeze(["none", "see_through", "full", "side_swept", "curtain"]);
 export const HAIR_PARTS = Object.freeze(["none", "center", "side", "slicked_back"]);
@@ -102,7 +170,11 @@ export const HAIR_SPEC_TOOL = Object.freeze({
     ],
     properties: {
       hairVisible: { type: "boolean", description: "False if hair is cropped, covered, or not clearly visible." },
-      length: { type: "string", enum: [...HAIR_LENGTHS] },
+      length: {
+        type: "string",
+        enum: [...HAIR_LENGTHS],
+        description: "Where the longest hair ends: chin = at the jaw, shoulder = resting on the shoulders, chest = below the shoulder line (armpit/chest), long = below the chest.",
+      },
       cut: { type: "string", description: "Short English phrase such as layered cut or two-block." },
       bangs: { type: "string", enum: [...HAIR_BANGS] },
       part: { type: "string", enum: [...HAIR_PARTS] },

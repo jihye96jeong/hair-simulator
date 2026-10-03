@@ -10,6 +10,10 @@ import {
   buildIdentityPolygon,
   faceAnchorPoints,
   fitTone,
+  foreheadFade,
+  hairDrifted,
+  hairLengthFromMask,
+  maskFaceHair,
   pointInPolygon,
   compositeLiveFace,
   compositeSyncedFace,
@@ -284,6 +288,144 @@ test("compositeSyncedFace: webcam face inside the oval, Lucy outside, Lucy hair 
     base, region, face, faceWidth: width, faceHeight: height, transform, polygon, featherRadius: 0, toneMatch: true,
   });
   assert.ok(toned.tone.samples > 0);
+});
+
+test("foreheadFade + compositeSyncedFace: the paste ramps out up the forehead instead of ending at a line", () => {
+  const { marks, width, height } = landmarks({ width: 240, height: 320 });
+  const pts = marks.map((p) => ({ x: p.x * width, y: p.y * height }));
+  const span = Math.hypot(pts[263].x - pts[33].x, pts[263].y - pts[33].y);
+  const fade = foreheadFade(marks, width, height, { startPx: span * 0.08, endPx: span * 0.25 });
+  assert.ok(fade);
+  assert.ok(Math.abs(fade.ux) < 1e-6 && Math.abs(fade.uy + 1) < 1e-6, "level face: up is straight up");
+  const browTop = Math.min(...EYEBROW_INDICES.map((i) => pts[i].y));
+  assert.ok(Math.abs(fade.y - browTop) < 1e-6, "anchored on the brow line");
+  assert.equal(foreheadFade(null, width, height, { startPx: 1, endPx: 2 }), null);
+
+  // A tall identity oval (forehead included) with the fade: alpha 255 just above the brows,
+  // partial mid-ramp, 0 beyond the end — with no feather at all, so the ramp is the only edge.
+  const identity = buildIdentityPolygon(marks, width, height, { browMarginPx: span * 0.35 });
+  const transform = { scale: 1, cos: 1, sin: 0, tx: 0, ty: 0 };
+  const polygon = transformPolygon(identity, transform);
+  const region = polygonRegion(polygon, width, height, 2);
+  const base = fill(region.width, region.height, [10, 20, 200]);
+  const face = fill(width, height, [200, 100, 50]);
+  const out = compositeSyncedFace({
+    base, region, face, faceWidth: width, faceHeight: height, transform, polygon, featherRadius: 0, toneMatch: false, fade,
+  });
+  const cx = Math.round((pts[33].x + pts[263].x) / 2);
+  const alphaAt = (gy) => out.rgba[((gy - region.y) * region.width + (cx - region.x)) * 4 + 3];
+  assert.equal(alphaAt(Math.round(browTop - span * 0.04)), 255, "fully the person's just above the brows");
+  const mid = alphaAt(Math.round(browTop - span * 0.165));
+  assert.ok(mid > 40 && mid < 215, `mid-ramp partial (${mid})`);
+  const gone = Math.round(browTop - span * 0.3);
+  assert.equal(alphaAt(gone), 0, "gone before the oval's top");
+  // Without the fade the same oval ends with a hard edge at its top.
+  const plain = compositeSyncedFace({
+    base, region, face, faceWidth: width, faceHeight: height, transform, polygon, featherRadius: 0, toneMatch: false,
+  });
+  assert.equal(plain.rgba[((gone - region.y) * region.width + (cx - region.x)) * 4 + 3], 255);
+});
+
+test("maskFaceHair + compositeSyncedFace: the user's own hair in the crop is not pasted over Lucy", () => {
+  const { marks, width, height } = landmarks({ width: 240, height: 320 });
+  const pts = marks.map((p) => ({ x: p.x * width, y: p.y * height }));
+  const span = Math.hypot(pts[263].x - pts[33].x, pts[263].y - pts[33].y);
+  const browTop = Math.min(...EYEBROW_INDICES.map((i) => pts[i].y));
+  const identity = buildIdentityPolygon(marks, width, height, { browMarginPx: span * 0.35 });
+  const transform = { scale: 1, cos: 1, sin: 0, tx: 0, ty: 0 };
+  const polygon = transformPolygon(identity, transform);
+  const region = polygonRegion(polygon, width, height, 2);
+  const base = fill(region.width, region.height, [10, 20, 200]);
+  const face = fill(width, height, [200, 100, 50]);
+  // Webcam hair mask (slightly different size, like the segmenter's resampled output): bangs
+  // cover everything above hairY on the left half of the frame.
+  const hw = width - 1;
+  const hh = height + 1;
+  const hairY = Math.round(browTop - span * 0.2);
+  const hair = new Float32Array(hw * hh);
+  for (let y = 0; y < hh; y++) for (let x = 0; x < hw; x++) if (y < hairY && x < hw / 2) hair[y * hw + x] = 1;
+  assert.equal(maskFaceHair(face, width, height, hair, hw, hh, 2), true);
+  assert.equal(face[(5 * width + 5) * 4 + 3], 0, "crop alpha 0 under hair");
+  assert.equal(face[((height - 5) * width + 5) * 4 + 3], 255, "crop alpha kept elsewhere");
+
+  const out = compositeSyncedFace({
+    base, region, face, faceWidth: width, faceHeight: height, transform, polygon, featherRadius: 0, toneMatch: false,
+  });
+  const alphaAt = (gx, gy) => out.rgba[((gy - region.y) * region.width + (gx - region.x)) * 4 + 3];
+  const cx = Math.round((pts[33].x + pts[263].x) / 2);
+  const probeY = Math.round(browTop - span * 0.28);
+  assert.equal(alphaAt(cx - 12, probeY), 0, "under the user's bangs Lucy's forehead shows");
+  assert.equal(alphaAt(cx + 12, probeY), 255, "bare forehead on the other side is still pasted");
+  assert.equal(alphaAt(cx - 12, Math.round(browTop - span * 0.05)), 255, "below the bangs the paste is intact");
+  // Bad input is rejected without touching the crop.
+  assert.equal(maskFaceHair(face, width, height, new Float32Array(3), 3, 1, 0), false);
+
+  // Forehead shadow cut: a dark wisp above the brows that the segmenter missed (empty hair mask)
+  // is removed because it is far darker than the cheeks; the skin around it and the face below
+  // the brow line stay.
+  const face2 = fill(width, height, [200, 100, 50]);
+  const wispY = Math.round(browTop - span * 0.2);
+  for (let y = wispY; y < wispY + 6; y++) for (let x = cx - 30; x < cx - 10; x++) {
+    const o = (y * width + x) * 4;
+    face2[o] = 40; face2[o + 1] = 25; face2[o + 2] = 20;
+  }
+  const line = foreheadFade(marks, width, height, { startPx: 0, endPx: 1 });
+  const skin = [50, 280, 101, 330].map((i) => pts[i]);
+  // Dark pixel below the brow line must be left alone (not forehead).
+  const chinO = ((pts[152]?.y ? Math.round(pts[152].y) - 4 : height - 6) * width + cx) * 4;
+  face2[chinO] = 40; face2[chinO + 1] = 25; face2[chinO + 2] = 20;
+  assert.equal(maskFaceHair(face2, width, height, new Float32Array(hw * hh), hw, hh, 0, { line, startPx: 2, skin, darkRatio: 0.75, blurPx: 1 }), true);
+  assert.ok(face2[((wispY + 3) * width + cx - 20) * 4 + 3] < 40, "wisp cut");
+  assert.equal(face2[((wispY + 3) * width + cx + 20) * 4 + 3], 255, "skin beside it kept");
+  assert.equal(face2[chinO + 3], 255, "dark pixel below the brow line kept");
+});
+
+test("hairLengthFromMask reads the length category off the styled still", () => {
+  const { marks, width, height } = landmarks({ width: 200, height: 600 });
+  // Face: forehead top (10) and chin (152) 80 px apart.
+  marks[10] = { x: 0.5, y: 100 / height, z: 0 };
+  marks[152] = { x: 0.5, y: 180 / height, z: 0 };
+  const withHairDownTo = (bottom, { specks = 0 } = {}) => {
+    const mask = new Uint8Array(width * height);
+    for (let y = 60; y < bottom; y++) for (let x = 40; x < 160; x++) mask[y * width + x] = 1;
+    for (let i = 0; i < specks; i++) mask[(height - 3) * width + i] = 1;
+    return mask;
+  };
+  const read = (bottom, opts) => hairLengthFromMask(withHairDownTo(bottom, opts), width, height, marks);
+  assert.equal(read(140).length, "short");          // ends above the chin
+  assert.equal(read(185).length, "chin");
+  assert.equal(read(230).length, "shoulder");       // 0.6 face heights below the chin
+  assert.equal(read(290).length, "chest");          // 1.4
+  assert.equal(read(340).length, "long");           // 2.0
+  assert.equal(read(290).clipped, false);
+  assert.equal(read(height).clipped, true);
+  // A few stray hair pixels near the bottom do not count.
+  assert.equal(read(230, { specks: 20 }).length, "shoulder");
+  assert.equal(hairLengthFromMask(new Uint8Array(width * height), width, height, marks), null, "no hair → null");
+  assert.equal(hairLengthFromMask(withHairDownTo(230), width, height, null), null);
+});
+
+test("hairDrifted: bangs dropping back to the person's own hair is a drift", () => {
+  const { marks, width, height } = landmarks({ width: 200, height: 400 });
+  marks[10] = { x: 0.5, y: 80 / height, z: 0 };
+  marks[152] = { x: 0.5, y: 160 / height, z: 0 };
+  for (const i of EYEBROW_INDICES) marks[i] = { x: 0.5, y: 100 / height, z: 0 };
+  marks[33] = { x: 0.35, y: 120 / height, z: 0 };
+  marks[263] = { x: 0.65, y: 120 / height, z: 0 };
+  const measure = (y0, y1) => {
+    const mask = new Uint8Array(width * height);
+    for (let y = y0; y < y1; y++) for (let x = 50; x < 150; x++) mask[y * width + x] = 1;
+    return hairLengthFromMask(mask, width, height, marks);
+  };
+  const bob = measure(40, 170);
+  const own = measure(40, 62);
+  const liveOwn = measure(40, 64);
+  const liveBob = measure(40, 168);
+  assert.ok(bob.front > 0.5, `bob covers the forehead (${bob.front})`);
+  assert.ok(own.front < 0.15, `own hair leaves the forehead open (${own.front})`);
+  assert.equal(hairDrifted(liveOwn, bob, own), true);
+  assert.equal(hairDrifted(liveBob, bob, own), false);
+  assert.equal(hairDrifted(null, bob, own), false);
 });
 
 test("compositeSyncedFace: low-frequency transfer takes Lucy's colour, keeps the webcam detail", () => {

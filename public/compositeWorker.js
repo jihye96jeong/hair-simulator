@@ -5,11 +5,12 @@
  *
  *   { type: "init" }                       → { type: "ready" }
  *   { type: "forget", ids }                → (drops cached face crops)
- *   { id, base, region, hair, faceId, face?, faceX, faceY, faceWidth, faceHeight, faceScale,
- *     transform, polygon, clipPolygon, clipGrow, featherRadius, blendRadius, blendStrength }
+ *   { id, base, region, hair, faceId, face?, faceHair?, faceX, faceY, faceWidth, faceHeight, faceScale,
+ *     transform, polygon, clipPolygon, clipGrow, featherRadius, blendRadius, blendStrength, fade }
+ *   faceHair = { mask (Float32 0..1, 1 = hair), width, height, grow, forehead } for the webcam crop
  *                                          → { id, rgba, region, toneSamples, painted }
  */
-import { compositeSyncedFace } from "./hairFaceLock.js";
+import { compositeSyncedFace, maskFaceHair } from "./hairFaceLock.js";
 
 const faces = new Map();
 const MAX_FACES = 160;
@@ -25,12 +26,16 @@ self.onmessage = (event) => {
     return;
   }
   const {
-    id, base, region, hair, faceId, face, faceX, faceY, faceWidth, faceHeight, faceScale = 1, transform, polygon,
-    clipPolygon, clipGrow, featherRadius, blendRadius = 0, blendStrength = 1,
+    id, base, region, hair, faceId, face, faceHair = null, faceX, faceY, faceWidth, faceHeight, faceScale = 1,
+    transform, polygon, clipPolygon, clipGrow, featherRadius, blendRadius = 0, blendStrength = 1, fade = null,
   } = data;
   try {
     const t0 = performance.now();
     if (face) {
+      // The webcam's own hair becomes transparent in the crop, once, when the crop arrives.
+      if (faceHair?.mask) {
+        maskFaceHair(face, faceWidth, faceHeight, faceHair.mask, faceHair.width, faceHair.height, faceHair.grow, faceHair.forehead);
+      }
       faces.set(faceId, face);
       if (faces.size > MAX_FACES) faces.delete(faces.keys().next().value);
     }
@@ -38,7 +43,7 @@ self.onmessage = (event) => {
     if (!pixels) throw new Error("face crop missing");
     const rendered = compositeSyncedFace({
       base, region, baseHair: hair, face: pixels, faceX, faceY, faceWidth, faceHeight, faceScale,
-      transform, polygon, clipPolygon, clipGrow, featherRadius, blendRadius, blendStrength,
+      transform, polygon, clipPolygon, clipGrow, featherRadius, blendRadius, blendStrength, fade,
     });
     const timing = { composite: performance.now() - t0 };
     if (!rendered) {

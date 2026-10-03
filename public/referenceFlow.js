@@ -1,10 +1,10 @@
 import { decodeReferenceBitmap, downscaleBitmap, prepareReferenceUpload, validateReferenceFile } from "./hairReference.js";
-import { IMAGE_HAIR_PROMPT, REFERENCE_ENHANCE, buildHairPrompt } from "./hairPrompt.js";
+import { HAIR_LENGTHS, IMAGE_HAIR_PROMPT, REFERENCE_ENHANCE, buildHairPrompt, buildImageHairPrompt } from "./hairPrompt.js";
 import { CAP_SECONDS, REFERENCE_SESSION_KEY } from "./shared.js";
 import { RealtimeSession } from "./session.js";
 import { openFrontCamera, stopMediaStream, videoTrackSettings } from "./camera.js";
 import { captureFrame, downloadCapture } from "./capture.js";
-import { lockHairOntoUser } from "./hairFaceLock.js";
+import { hairDrifted, lockHairOntoUser } from "./hairFaceLock.js";
 import { startLiveFaceLock } from "./liveFaceLock.js";
 import { createPortraitStream } from "./portraitStream.js";
 import { aspectRatioForLength, createSelfieCapture } from "./selfie.js";
@@ -77,6 +77,8 @@ export function createReferenceFlow({
   let previewSelectedIndex = null;
   let previewCandidates = [];
   let previewReferenceCore = null;
+  /** Hair length measured on the face-locked still ({ length, reach, clipped }) or null. */
+  let previewHairLength = null;
   let previewFailCount = 0;
   let captureAspectRatio = "";
   let consented = false;
@@ -85,6 +87,11 @@ export function createReferenceFlow({
   let captureCanvas = null;
   let lastLucyPrompt = "";
   let lastLucyEnhance = REFERENCE_ENHANCE;
+  let lastLucyImage = null;
+  let hairDriftedLive = false;
+  let reanchorCount = 0;
+  let lastReanchorAt = 0;
+  let liveStartedAt = 0;
   let labDebug = null;
 
   const selfie = createSelfieCapture({
@@ -101,13 +108,14 @@ export function createReferenceFlow({
     if (!useImage || opts.promptmode === "spec") {
       return hairSpec ? buildHairPrompt(hairSpec, { withImage: false }) : hairPromptText;
     }
-    return IMAGE_HAIR_PROMPT;
+    return buildImageHairPrompt(lucySpec());
   }
   function promptKind(useImage, prompt) {
     const opts = labOptions();
     if (opts.lucyprompt) return "lucyprompt";
     if (!useImage || opts.promptmode === "spec") return "spec-text";
     if (prompt === IMAGE_HAIR_PROMPT) return "IMAGE_HAIR_PROMPT";
+    if (prompt.includes("Keep the hairstyle already shown in this attached photo")) return "IMAGE_HAIR_PROMPT+spec";
     return "other";
   }
   function revoke(url) { if (url) URL.revokeObjectURL(url); }
@@ -274,7 +282,7 @@ export function createReferenceFlow({
     const promptText = prompt ?? lastLucyPrompt;
     const enhanceVal = enhance ?? lastLucyEnhance;
     promptEl.textContent = [
-      `spec.length=${length} crop=${cropAspect} geminiAspect=${geminiAspect}`,
+      `spec.length=${length} bangs=${hairSpec?.bangs || "—"} part=${hairSpec?.part || "—"} front=${hairSpec?.front || "—"} forehead=${hairSpec?.forehead || "—"} crop=${cropAspect} geminiAspect=${geminiAspect} drift=${hairDriftedLive ? "yes" : "no"} reanchor=${reanchorCount} measured=${previewHairLength ? `${previewHairLength.length} (${previewHairLength.reach.toFixed(2)} face heights below chin${previewHairLength.clipped ? ", clipped" : ""})` : "—"} lucy.length=${lucySpec()?.length || "—"}`,
       `5 Lucy live: camera=${liveInfo.camera || "—"} input=${liveInfo.input || "—"} mirror=${liveInfo.mirror} output=${liveInfo.output || "—"}`,
       `5b face sync: ${liveInfo.sync || "—"}`,
       `3 Lucy prompt / enhance`,
@@ -359,6 +367,12 @@ export function createReferenceFlow({
     previewSelectedIndex = null;
     previewCandidates = [];
     previewReferenceCore = null;
+    previewHairLength = null;
+    lastLucyImage = null;
+    hairDriftedLive = false;
+    reanchorCount = 0;
+    lastReanchorAt = 0;
+    liveStartedAt = 0;
     previewFailCount = 0;
     captureAspectRatio = "";
     identityDataUrl = "";
@@ -634,9 +648,44 @@ export function createReferenceFlow({
       personDataUrl: selfieDataUrl,
       styledBlob: previewBlob,
     }).catch(() => null);
-    if (!locked?.blob || uploadSeq !== uploadAtStart) return null;
+    if (uploadSeq !== uploadAtStart) return null;
+    previewHairLength = locked?.hairLength || null;
+    if (!locked?.blob) return null;
     lockedMaskDataUrl = locked.maskDataUrl;
     return { dataUrl: locked.dataUrl, blob: locked.blob };
+  }
+
+  /**
+   * Length Lucy is told: the analysed length, or what the styled still really shows when that
+   * is longer (hair visibly reaching further down is hard evidence; a shorter measure may just
+   * be the segmenter missing thin ends or the still being cut off at the bottom).
+   */
+  function lucySpec() {
+    if (!hairSpec) return null;
+    const measured = previewHairLength;
+    if (!measured?.length || HAIR_LENGTHS.indexOf(measured.length) <= HAIR_LENGTHS.indexOf(hairSpec.length)) return hairSpec;
+    return { ...hairSpec, length: measured.length };
+  }
+
+  /** How long Lucy is left to settle after connect / a re-push before another re-push. */
+  const REANCHOR_SETTLE_MS = 2500;
+  /** Minimum gap between style-image re-pushes (Lucy flashes if this is too frequent). */
+  const REANCHOR_GAP_MS = 4500;
+
+  /**
+   * Lucy v2v copies the camera hair again after a head turn. When the live hair looks like
+   * the person's own hair rather than the styled still, push the still + prompt again.
+   */
+  function maybeReanchor(active, imageBlob, prompt) {
+    if (!active || !imageBlob || active.stopped) return;
+    const now = performance.now();
+    if (now - liveStartedAt < REANCHOR_SETTLE_MS) return;
+    if (now - lastReanchorAt < REANCHOR_GAP_MS) return;
+    lastReanchorAt = now;
+    reanchorCount += 1;
+    void active.setHairReference(imageBlob, prompt).catch(() => {
+      lastReanchorAt = 0;
+    });
   }
 
   /**
@@ -714,7 +763,13 @@ export function createReferenceFlow({
             mirror,
             onStats: (stats) => {
               const timing = Object.entries(stats.timing || {}).map(([k, v]) => `${k}=${v}ms`).join(" ");
-              liveInfo.sync = `latency=${stats.latencyMs}ms lucy=${stats.lucyFps}fps composite=${stats.compositeFps}fps cam=${stats.webcamFps}fps misses=${stats.misses} dropped=${stats.dropped} [${stats.mode || "…"}] ${timing}${stats.lastError ? ` err=${stats.lastError}` : ""}`;
+              hairDriftedLive = Boolean(
+                lastLucyImage
+                && previewHairLength
+                && hairDrifted(stats.hair?.lucy, previewHairLength, stats.hair?.webcam),
+              );
+              if (hairDriftedLive) maybeReanchor(active, lastLucyImage, lastLucyPrompt);
+              liveInfo.sync = `latency=${stats.latencyMs}ms lucy=${stats.lucyFps}fps composite=${stats.compositeFps}fps cam=${stats.webcamFps}fps misses=${stats.misses} dropped=${stats.dropped} [${stats.mode || "…"}] ${timing}${stats.lastError ? ` err=${stats.lastError}` : ""}${hairDriftedLive ? " drift" : ""}`;
               updateLabDebug();
             },
           });
@@ -738,6 +793,11 @@ export function createReferenceFlow({
       updateTime(0, 0);
       lastLucyPrompt = prompt;
       lastLucyEnhance = REFERENCE_ENHANCE;
+      lastLucyImage = useImage ? imageBlob : null;
+      liveStartedAt = performance.now();
+      lastReanchorAt = 0;
+      reanchorCount = 0;
+      hairDriftedLive = false;
       updateLabDebug({ prompt, enhance: lastLucyEnhance });
       await logPipelineTrace({ useImage, prompt, imageBlob });
       console.info("ref-live-input", liveInfo);

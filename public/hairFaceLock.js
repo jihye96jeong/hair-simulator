@@ -219,7 +219,7 @@ function polygonMask(width, height, polygon) {
  * Full face oval (no temple inset) clipped just above the brows: brows, eyes,
  * nose, mouth, cheeks, and jaw outline. These pixels stay the webcam photo.
  */
-export function buildIdentityPolygon(landmarks, width, height) {
+export function buildIdentityPolygon(landmarks, width, height, { browMarginPx = null } = {}) {
   if (!Array.isArray(landmarks) || landmarks.length < 468) return null;
   const points = landmarksToPixels(landmarks, width, height);
   let minBrow = Infinity;
@@ -228,7 +228,7 @@ export function buildIdentityPolygon(landmarks, width, height) {
   for (const i of EYE_INDICES) if (points[i]) minEye = Math.min(minEye, points[i].y);
   if (!Number.isFinite(minBrow) || !Number.isFinite(minEye)) return null;
   const gap = Math.max(0, minEye - minBrow);
-  const topY = minBrow - gap * IDENTITY_BROW_MARGIN_FACTOR;
+  const topY = minBrow - (browMarginPx ?? gap * IDENTITY_BROW_MARGIN_FACTOR);
   const oval = FACE_OVAL_RING.map((i) => points[i]).filter(Boolean);
   if (oval.length < 3) return null;
   const polygon = [];
@@ -245,6 +245,42 @@ export function buildIdentityPolygon(landmarks, width, height) {
     }
   }
   return polygon.length >= 3 ? polygon : null;
+}
+
+/**
+ * Forehead fade for `compositeSyncedFace`: the paste is fully the person's up to `startPx`
+ * above the brow line and fades to nothing at `endPx`, measured along the head's up axis.
+ * The forehead has no identity and no texture to hide a seam, so a long ramp there is the
+ * only edge that disappears.
+ */
+export function foreheadFade(landmarks, width, height, { startPx, endPx }) {
+  if (!Array.isArray(landmarks) || landmarks.length < 468) return null;
+  const points = landmarksToPixels(landmarks, width, height);
+  const l = points[33];
+  const r = points[263];
+  if (!l || !r) return null;
+  const span = Math.hypot(r.x - l.x, r.y - l.y);
+  if (!(span > 1)) return null;
+  // Up = eye line rotated 90° toward the forehead (image y grows downward).
+  let ux = (r.y - l.y) / span;
+  let uy = -(r.x - l.x) / span;
+  if (uy > 0) { ux = -ux; uy = -uy; }
+  // Brow line: the brow point farthest along `up`.
+  let best = -Infinity;
+  let bx = 0;
+  let by = 0;
+  for (const i of EYEBROW_INDICES) {
+    const p = points[i];
+    if (!p) continue;
+    const d = p.x * ux + p.y * uy;
+    if (d > best) { best = d; bx = p.x; by = p.y; }
+  }
+  if (!Number.isFinite(best)) return null;
+  // Anchor the line at the eye midpoint's lateral position so roll does not shift it.
+  const mx = (l.x + r.x) / 2;
+  const my = (l.y + r.y) / 2;
+  const along = (bx - mx) * ux + (by - my) * uy;
+  return { x: mx + ux * along, y: my + uy * along, ux, uy, start: startPx, end: Math.max(startPx + 1, endPx) };
 }
 
 /** Per-channel gain/offset that maps `styled` tones onto `person` tones over the sampled pixels. */
@@ -515,6 +551,109 @@ export function maskScaleFor(pixels) {
 }
 
 /**
+ * Writes the webcam's own hair into the face crop's alpha channel (alpha 0 under hair), so the
+ * paste never lays the user's bangs over Lucy's forehead. `hair` is a 0..1 mask (1 = hair) of
+ * `hairWidth`×`hairHeight` covering the crop (sizes may differ by rounding); it is softly grown
+ * by about `growPx` crop pixels first, because segmentation masks stop a little inside the hair.
+ */
+export function maskFaceHair(face, width, height, hair, hairWidth, hairHeight, growPx = 0, forehead = null) {
+  if (!face || !hair || face.length !== width * height * 4 || hair.length !== hairWidth * hairHeight) return false;
+  const r = Math.round(growPx);
+  let soft = hair;
+  let softW = hairWidth;
+  let softH = hairHeight;
+  let anyHair = false;
+  for (let i = 0; i < hair.length && !anyHair; i++) anyHair = hair[i] > 0.002;
+  if (r > 0 && anyHair) {
+    // Grown at half resolution: the mask is soft and coarse (segmenter output) anyway.
+    softW = Math.max(1, hairWidth >> 1);
+    softH = Math.max(1, hairHeight >> 1);
+    const half = new Float32Array(softW * softH);
+    for (let y = 0; y < softH; y++) {
+      const sy0 = Math.min(hairHeight - 1, y * 2) * hairWidth;
+      for (let x = 0; x < softW; x++) half[y * softW + x] = hair[sy0 + Math.min(hairWidth - 1, x * 2)];
+    }
+    const blurred = boxBlur(half, softW, softH, Math.max(1, r >> 1));
+    soft = blurred;
+    for (let i = 0; i < soft.length; i++) soft[i] = Math.min(1, blurred[i] * 2);
+  }
+  const shadow = forehead ? foreheadShadowMask(face, width, height, forehead) : null;
+  const sx = softW / width;
+  const sy = softH / height;
+  let touched = false;
+  for (let y = 0; y < height; y++) {
+    const hy = Math.min(softH - 1, (y * sy) | 0) * softW;
+    for (let x = 0; x < width; x++) {
+      let h = soft[hy + Math.min(softW - 1, (x * sx) | 0)];
+      if (shadow) {
+        const s = shadow[y * width + x];
+        if (s > h) h = s;
+      }
+      if (h <= 0.002) continue;
+      face[(y * width + x) * 4 + 3] = Math.round(255 * (1 - Math.min(1, h)));
+      touched = true;
+    }
+  }
+  return touched;
+}
+
+/**
+ * Hair the segmenter misses (thin bangs, wisps) and the shadow it throws on the forehead are
+ * both much darker than the person's skin. Above the brow line (`line` = {x, y, ux, uy} in crop
+ * px, `up` pointing to the forehead, from `startPx` on) pixels whose smoothed luminance falls
+ * below `darkRatio` × the skin luminance (median of small patches at `skin` points, cheeks) are
+ * masked, 0..1. A forehead is featureless skin, so nothing legitimate is lost.
+ */
+function foreheadShadowMask(face, width, height, { line, startPx = 0, skin = [], darkRatio = 0.75, blurPx = 2 }) {
+  if (!line || !skin.length) return null;
+  const lumAt = (x, y) => {
+    const o = (y * width + x) * 4;
+    return 0.299 * face[o] + 0.587 * face[o + 1] + 0.114 * face[o + 2];
+  };
+  const samples = [];
+  for (const p of skin) {
+    const cx = Math.round(p.x);
+    const cy = Math.round(p.y);
+    if (cx < 2 || cy < 2 || cx >= width - 2 || cy >= height - 2) continue;
+    let s = 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) s += lumAt(cx + dx, cy + dy);
+    samples.push(s / 25);
+  }
+  if (samples.length < 2) return null;
+  samples.sort((a, b) => a - b);
+  const skinLum = samples[samples.length >> 1];
+  if (skinLum < 40) return null;
+  // Only the rows that can lie above the brow line are examined (the forehead is the top of the crop).
+  const dAt = (x, y) => (x + 0.5 - line.x) * line.ux + (y + 0.5 - line.y) * line.uy - startPx;
+  let rows = 0;
+  for (let y = height - 1; y >= 0 && rows === 0; y--) {
+    if (dAt(0, y) > 0 || dAt(width - 1, y) > 0) rows = y + 1;
+  }
+  if (rows === 0) return null;
+  const lum = new Float32Array(width * rows);
+  for (let y = 0; y < rows; y++) for (let x = 0; x < width; x++) lum[y * width + x] = lumAt(x, y);
+  const smooth = blurPx > 0 ? boxBlur(lum, width, rows, Math.round(blurPx)) : lum;
+  // Dark below hi × skin, fully masked below lo × skin.
+  const hi = skinLum * darkRatio;
+  const lo = skinLum * darkRatio * 0.8;
+  const ramp = Math.max(1, blurPx * 2);
+  const out = new Float32Array(width * height);
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < width; x++) {
+      const d = dAt(x, y);
+      if (d <= 0) continue;
+      const v = smooth[y * width + x];
+      if (v >= hi) continue;
+      let s = v <= lo ? 1 : (hi - v) / (hi - lo);
+      // Ease in over the first rows above the line so the cut has no straight lower edge.
+      if (d < ramp) s *= d / ramp;
+      out[y * width + x] = s;
+    }
+  }
+  return out;
+}
+
+/**
  * Lucy-base, time-synced face paste for one region of the Lucy frame.
  * Lucy's frame (hair, body, background, lighting) stays; inside the identity oval the pixels
  * are the webcam face captured at the same moment, aligned by `transform` (webcam → Lucy
@@ -531,6 +670,8 @@ export function maskScaleFor(pixels) {
  * `blendRadius` > 0 enables low-frequency transfer: colour/lighting below this radius (px) come
  *               from Lucy's frame, detail above it from the webcam face (`blendStrength` 0..1).
  *               Replaces the gain/offset tone match.
+ * `fade`        optional forehead ramp from `foreheadFade` (Lucy-frame px): alpha is 1 up to
+ *               `start` above the brow line and 0 at `end`.
  * Returns RGBA for the region (alpha 0 where Lucy stays) and the fitted tone.
  */
 export function compositeSyncedFace({
@@ -551,6 +692,7 @@ export function compositeSyncedFace({
   toneMatch = true,
   blendRadius = 0,
   blendStrength = 1,
+  fade = null,
 } = {}) {
   if (!base || !face || !region || !transform || !polygon?.length) return null;
   const { x: rx, y: ry, width: rw, height: rh } = region;
@@ -584,6 +726,25 @@ export function compositeSyncedFace({
     core = new Float32Array(mpixels);
     for (let i = 0; i < mpixels; i++) core[i] = shrink[i] > 0.97 ? 1 : 0;
     alphaMask = boxBlur(core, mw, mh, feather);
+  }
+  if (fade) {
+    // Long ramp up the forehead (smoothstep along the head's up axis); also keeps the tone
+    // samples / low-frequency weights to the part that is really pasted.
+    if (alphaMask === identityHard) alphaMask = Float32Array.from(identityHard);
+    const inv = 1 / (fade.end - fade.start);
+    for (let my = 0; my < mh; my++) {
+      const py = ry + (my + 0.5) * ms;
+      for (let mx = 0; mx < mw; mx++) {
+        const i = my * mw + mx;
+        if (alphaMask[i] <= 0) continue;
+        const px = rx + (mx + 0.5) * ms;
+        const d = (px - fade.x) * fade.ux + (py - fade.y) * fade.uy;
+        if (d <= fade.start) continue;
+        if (d >= fade.end) { alphaMask[i] = 0; continue; }
+        const t = (d - fade.start) * inv;
+        alphaMask[i] *= 1 - t * t * (3 - 2 * t);
+      }
+    }
   }
   let hairSoft = null;
   if (baseHair?.length === pixels || baseHair?.length === mpixels) {
@@ -627,7 +788,8 @@ export function compositeSyncedFace({
   const fhMax = faceHeight - 1;
   const offX = faceX * faceScale + 0.5;
   const offY = faceY * faceScale + 0.5;
-  const rgbSample = [0, 0, 0];
+  // [r, g, b, alpha 0..1]; the crop's alpha is 0 where the webcam frame shows the user's own hair.
+  const rgbSample = [0, 0, 0, 1];
   const sampleFace = (sx, sy) => {
     if (sx < 0 || sy < 0 || sx > fwMax || sy > fhMax) return false;
     const x0 = sx | 0;
@@ -647,6 +809,7 @@ export function compositeSyncedFace({
     rgbSample[0] = face[i00] * w00 + face[i10] * w10 + face[i01] * w01 + face[i11] * w11;
     rgbSample[1] = face[i00 + 1] * w00 + face[i10 + 1] * w10 + face[i01 + 1] * w01 + face[i11 + 1] * w11;
     rgbSample[2] = face[i00 + 2] * w00 + face[i10 + 2] * w10 + face[i01 + 2] * w01 + face[i11 + 2] * w11;
+    rgbSample[3] = (face[i00 + 3] * w00 + face[i10 + 3] * w10 + face[i01 + 3] * w01 + face[i11 + 3] * w11) / 255;
     return true;
   };
 
@@ -679,6 +842,8 @@ export function compositeSyncedFace({
         const sx = inv * (transform.cos * dx0 + transform.sin * dy0) - offX;
         const sy = inv * (-transform.sin * dx0 + transform.cos * dy0) - offY;
         if (!sampleFace(sx, sy)) continue;
+        w *= rgbSample[3];
+        if (w <= 0.01) continue;
         const bx = Math.min(rw - 1, Math.round((gx + 0.5) * bs - 0.5));
         const bo = (by * rw + bx) * 4;
         const i = gy * bw + gx;
@@ -737,7 +902,7 @@ export function compositeSyncedFace({
       for (let x = 0; x < rw; x += stride, sx += ax * stride, sy += ay * stride) {
         const mi = my * mw + Math.min(mw - 1, (x / ms) | 0);
         if (core[mi] < 1 || (hairSoft && hairSoft[mi] > 0.2)) continue;
-        if (!sampleFace(sx, sy)) continue;
+        if (!sampleFace(sx, sy) || rgbSample[3] < 0.8) continue;
         const o = (y * rw + x) * 4;
         for (let c = 0; c < 3; c++) {
           const s = rgbSample[c];
@@ -822,6 +987,12 @@ export function compositeSyncedFace({
       const i10 = (fy0 * faceWidth + fx1) * 4;
       const i01 = (fy1 * faceWidth + fx0) * 4;
       const i11 = (fy1 * faceWidth + fx1) * 4;
+      // The crop's own alpha (0 under the user's hair) thins the paste there, so Lucy's forehead shows.
+      const fa = face[i00 + 3] * w00 + face[i10 + 3] * w10 + face[i01 + 3] * w01 + face[i11 + 3] * w11;
+      if (fa < 254) {
+        a *= fa / 255;
+        if (a <= 0.004) continue;
+      }
       const o = (row + x) * 4;
       // Uint8ClampedArray rounds and clamps on store.
       out[o] = (face[i00] * w00 + face[i10] * w10 + face[i01] * w01 + face[i11] * w11) * g0 + f0 + d0;
@@ -861,6 +1032,96 @@ function drawBitmap(bitmap) {
 }
 
 /**
+ * Hair length category read off the styled still itself: how far below the chin the hair
+ * reaches, in face heights (forehead top → chin). The analysed spec often says "shoulder" for
+ * chest-length hair, and Lucy then obeys the words, so the picture is the authority here.
+ * `mask` is a hair mask (0/1 or 0..1, counted above 0.5) of `width`×`height`; the landmarks are
+ * normalised so the mask may be a downscaled copy of the frame. The lowest 2 % of hair pixels
+ * are ignored as specks. Returns null when there is too little hair or no usable face.
+ * `clipped` means the hair runs off the bottom of the image (the real length is at least this).
+ * `area` is the hair area in face-height² units, a framing-independent size of the hairstyle.
+ */
+export function hairLengthFromMask(mask, width, height, landmarks) {
+  if (!mask || mask.length !== width * height || !Array.isArray(landmarks) || landmarks.length < 468) return null;
+  const points = landmarksToPixels(landmarks, width, height);
+  const chin = points[152].y;
+  const faceHeight = chin - points[10].y;
+  if (!(faceHeight > 8)) return null;
+  const rows = new Uint32Array(height);
+  let total = 0;
+  for (let y = 0; y < height; y++) {
+    let n = 0;
+    const row = y * width;
+    for (let x = 0; x < width; x++) if (mask[row + x] > 0.5) n += 1;
+    rows[y] = n;
+    total += n;
+  }
+  if (total < faceHeight * faceHeight * 0.05) return null;
+  const skip = total * 0.02;
+  let acc = 0;
+  let bottom = height - 1;
+  for (let y = height - 1; y >= 0; y--) {
+    acc += rows[y];
+    if (acc >= skip) { bottom = y; break; }
+  }
+  const reach = (bottom + 0.5 - chin) / faceHeight;
+  let widest = 0;
+  for (let y = 0; y < height; y++) if (rows[y] > widest) widest = rows[y];
+  const clipped = rows[height - 1] + rows[height - 2] >= widest * 0.2;
+  let length;
+  if (reach < -0.6) length = "very_short";
+  else if (reach < -0.3) length = "short";
+  else if (reach < 0.15) length = "chin";
+  else if (reach < 1.0) length = "shoulder";
+  else if (reach < 1.7) length = "chest";
+  else length = "long";
+  // Fraction of the forehead band (brows → 0.45 face-heights above, between the eyes) that is
+  // hair: full bangs sit near 1, an exposed forehead near 0. Used to catch Lucy dropping bangs.
+  let browY = Infinity;
+  for (const i of EYEBROW_INDICES) if (points[i].y < browY) browY = points[i].y;
+  const midX = (points[33].x + points[263].x) / 2;
+  const half = Math.abs(points[263].x - points[33].x) * 0.7;
+  const x0 = Math.max(0, Math.floor(midX - half));
+  const x1 = Math.min(width, Math.ceil(midX + half));
+  const y0 = Math.max(0, Math.floor(browY - faceHeight * 0.45));
+  const y1 = Math.min(height, Math.ceil(browY));
+  let frontHair = 0;
+  let frontTotal = 0;
+  for (let y = y0; y < y1; y++) {
+    const row = y * width;
+    for (let x = x0; x < x1; x++) {
+      frontTotal += 1;
+      if (mask[row + x] > 0.5) frontHair += 1;
+    }
+  }
+  return {
+    reach, length, clipped,
+    area: total / (faceHeight * faceHeight),
+    front: frontTotal ? frontHair / frontTotal : 0,
+  };
+}
+
+/**
+ * Has Lucy's hair drifted back to the person's own hair? Compares the live hair measure with
+ * the styled still (`target`) and the webcam (`own`), both from `hairLengthFromMask`: it is a
+ * drift when the live hair is far from the target and clearly closer to the person's own hair.
+ * Reach is only compared when neither side is cut off by its frame; area always is.
+ */
+export function hairDrifted(live, target, own, { minDistance = 0.35, ownRatio = 0.6 } = {}) {
+  if (!live || !target) return false;
+  const distance = (a, b) => {
+    const area = Math.abs((a.area ?? 0) - (b.area ?? 0)) / Math.max(0.3, b.area || 0.3);
+    const reach = a.clipped || b.clipped ? 0 : Math.abs(a.reach - b.reach);
+    const front = Math.abs((a.front ?? 0) - (b.front ?? 0));
+    return Math.max(area, reach, front);
+  };
+  const toTarget = distance(live, target);
+  if (toTarget < minDistance) return false;
+  if (!own) return toTarget > minDistance * 1.6;
+  return distance(live, own) < toTarget * ownRatio;
+}
+
+/**
  * Final still for Lucy: Gemini's styled frame with the webcam face blended back.
  * Returns null when alignment is not possible; the caller keeps the Gemini preview.
  * Browser tests set `__testFaceRestore = "skip"` so the preview bytes stay unchanged.
@@ -884,6 +1145,9 @@ export async function lockHairOntoUser({ personDataUrl, styledBlob } = {}) {
     } catch {
       styledHair = null;
     }
+    const hairLength = styledHair
+      ? hairLengthFromMask(styledHair, styledCanvas.width, styledCanvas.height, styledFaces[0])
+      : null;
     const personCtx = personCanvas.getContext("2d", { willReadFrequently: true });
     const styledCtx = styledCanvas.getContext("2d", { willReadFrequently: true });
     const rendered = renderLockedPreview({
@@ -897,7 +1161,7 @@ export async function lockHairOntoUser({ personDataUrl, styledBlob } = {}) {
       styledLandmarks: styledFaces[0],
       styledHair,
     });
-    if (!rendered) return null;
+    if (!rendered) return hairLength ? { blob: null, hairLength } : null;
     const out = document.createElement("canvas");
     out.width = personCanvas.width;
     out.height = personCanvas.height;
@@ -910,8 +1174,9 @@ export async function lockHairOntoUser({ personDataUrl, styledBlob } = {}) {
       scale: Number(rendered.transform.scale.toFixed(3)),
       hairMask: Boolean(styledHair),
       toneSamples: rendered.tone.samples,
+      hairLength: hairLength ? `${hairLength.length} (${hairLength.reach.toFixed(2)} face heights below the chin${hairLength.clipped ? ", clipped" : ""})` : null,
     });
-    return { blob, dataUrl: out.toDataURL("image/jpeg", 0.92), maskDataUrl, mode: rendered.mode };
+    return { blob, dataUrl: out.toDataURL("image/jpeg", 0.92), maskDataUrl, mode: rendered.mode, hairLength };
   } catch (error) {
     console.warn("hair-face-lock", error?.message || error);
     return null;

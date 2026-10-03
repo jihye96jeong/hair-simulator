@@ -5,6 +5,9 @@ import {
   compositeSyncedFace,
   faceAlignPoints,
   faceAnchorPoints,
+  foreheadFade,
+  hairLengthFromMask,
+  maskFaceHair,
   maskScaleFor,
   polygonRegion,
   similarityFromCorrespondences,
@@ -32,6 +35,32 @@ const CLIP_GROW_RATIO = 0.05;
  */
 const BLEND_RATIO = 0.16;
 const BLEND_STRENGTH = 1;
+/**
+ * Forehead (fractions of the eye span above the brow line): the identity oval reaches
+ * IDENTITY_TOP, the paste is fully the person's up to FADE_START and gone at FADE_END. The
+ * forehead has nothing to hide a seam, so the edge is a long ramp instead of a feathered line.
+ */
+const IDENTITY_TOP_RATIO = 0.42;
+const FADE_START_RATIO = 0.08;
+const FADE_END_RATIO = 0.4;
+/**
+ * The taller oval reaches where the user's own bangs may hang, so the webcam frame is hair-
+ * segmented too and that hair is cut out of the crop (grown by this fraction of the eye span).
+ * Until a webcam hair mask exists the oval stops just above the brows as before.
+ */
+const WEBCAM_HAIR_GROW_RATIO = 0.1;
+const WEBCAM_HAIR_INTERVAL_MS = 400;
+/** Hair length / area of Lucy's frame and the webcam are measured this often for drift checks. */
+const HAIR_MEASURE_INTERVAL_MS = 500;
+/**
+ * Segmenters miss thin bangs and cannot see the shadow they throw on the forehead; above the
+ * brow line (from this fraction of the eye span up) anything darker than DARK_RATIO × the skin
+ * luminance (sampled on the cheeks) is cut out of the crop as well.
+ */
+const WEBCAM_SHADOW_START_RATIO = 0.03;
+const WEBCAM_SHADOW_DARK_RATIO = 0.78;
+/** Cheek / nose-bridge landmarks whose luminance stands for "this person's skin". */
+const SKIN_SAMPLE_INDICES = [50, 280, 101, 330, 205, 425, 6];
 /** Lucy never returns a frame faster than this; closer candidates are look-alikes. */
 const MIN_LUCY_LATENCY_MS = 250;
 /** Weight of expression features (mouth/eyes) vs. head position when matching frames. */
@@ -242,7 +271,7 @@ export async function createFaceDetectorAsync() {
  * compositor uses the latest mask, shifted by how far the head moved since it was taken.
  * Falls back to a main-thread segmenter at a low cadence when the worker cannot start.
  */
-function createHairMaskProvider() {
+function createHairMaskProvider({ minIntervalMs = 0 } = {}) {
   const client = createVisionWorkerClient("hair");
   let useWorker = null;
   let closed = false;
@@ -250,6 +279,7 @@ function createHairMaskProvider() {
   let fallback = null;
   let fallbackPromise = null;
   let lastFallbackAt = -Infinity;
+  let lastRequestAt = -Infinity;
   void client.ready.then((ok) => { useWorker = ok; if (!ok) client.close(); });
 
   function runFallback(small, lw, lh, now, anchors) {
@@ -273,7 +303,8 @@ function createHairMaskProvider() {
         runFallback(small, lw, lh, now, anchors);
         return;
       }
-      if (client.busy) return;
+      if (client.busy || now - lastRequestAt < minIntervalMs) return;
+      lastRequestAt = now;
       createImageBitmap(small).then((bitmap) => {
         if (closed) {
           bitmap.close?.();
@@ -290,6 +321,15 @@ function createHairMaskProvider() {
      * Latest mask resampled (bilinear, 0..1) for `region` of the Lucy frame, shifted by how far
      * the head moved since the mask was taken.
      */
+    /** True when a mask recent enough to use exists. */
+    fresh(now) {
+      return Boolean(latest) && now - latest.at <= HAIR_MASK_MAX_AGE_MS;
+    },
+    /** Hair length / area of the latest mask against `landmarks` (normalised), or null. */
+    measure(landmarks, now) {
+      if (!latest || now - latest.at > HAIR_MASK_MAX_AGE_MS) return null;
+      return hairLengthFromMask(latest.mask, latest.width, latest.height, landmarks);
+    },
     regionMask(region, anchors, now, scale = 1) {
       if (!latest || now - latest.at > HAIR_MASK_MAX_AGE_MS) return null;
       const { mask, width, height, lucyWidth, lucyHeight } = latest;
@@ -431,7 +471,12 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
   let latencyEstimate = NaN;
   let stopWebcam = () => {};
   let stopLucy = () => {};
-  const stats = { latencyMs: 0, lucyFps: 0, compositeFps: 0, webcamFps: 0, toneSamples: 0, misses: 0, dropped: 0, lastError: "", timing: {}, mode: "" };
+  const stats = {
+    latencyMs: 0, lucyFps: 0, compositeFps: 0, webcamFps: 0, toneSamples: 0, misses: 0, dropped: 0, lastError: "", timing: {}, mode: "",
+    /** Hair length / area measures (hairLengthFromMask) of Lucy's frame and of the webcam, for drift checks. */
+    hair: { lucy: null, webcam: null },
+  };
+  let lastHairMeasureAt = { lucy: -Infinity, webcam: -Infinity };
   let lucyFrames = 0;
   let compositeFrames = 0;
   let webcamFrames = 0;
@@ -441,12 +486,24 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
     stats.compositeFps = compositeFrames;
     stats.webcamFps = webcamFrames;
     stats.timing = Object.fromEntries(Object.entries(timing).map(([k, v]) => [k, Math.round(v)]));
-    stats.mode = tools ? `${tools.webcamFaces.mode}/${tools.lucyFaces.mode}/${tools.lucyHair.mode}/${tools.composite.mode}` : "";
+    stats.mode = tools
+      ? `${tools.webcamFaces.mode}/${tools.lucyFaces.mode}/${tools.lucyHair.mode}/${tools.webcamHair.mode}/${tools.composite.mode}`
+      : "";
     lucyFrames = 0;
     compositeFrames = 0;
     webcamFrames = 0;
-    onStats?.({ ...stats });
+    onStats?.({ ...stats, hair: { ...stats.hair } });
   }, 1000);
+
+  /** Hair measure of one side at most every HAIR_MEASURE_INTERVAL_MS (a few hundred rows each). */
+  function measureHair(side, provider, landmarks, now) {
+    if (now - lastHairMeasureAt[side] < HAIR_MEASURE_INTERVAL_MS) return;
+    lastHairMeasureAt[side] = now;
+    try {
+      const m = provider.measure(landmarks, now);
+      if (m) stats.hair[side] = m;
+    } catch { /* keep the previous measure */ }
+  }
 
   function pruneEntries(now) {
     const forget = [];
@@ -464,7 +521,7 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
   }
 
   function closeTools() {
-    for (const tool of [tools?.webcamFaces, tools?.lucyFaces, tools?.lucyHair, tools?.composite]) {
+    for (const tool of [tools?.webcamFaces, tools?.lucyFaces, tools?.lucyHair, tools?.webcamHair, tools?.composite]) {
       try { tool?.close(); } catch { /* ignore */ }
     }
     tools = null;
@@ -505,7 +562,12 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
         createFaceDetectorAsync(),
         createCompositor(),
       ]);
-      tools = { webcamFaces, lucyFaces, composite, lucyHair: createHairMaskProvider() };
+      tools = {
+        webcamFaces, lucyFaces, composite,
+        lucyHair: createHairMaskProvider(),
+        // The user's own hairline barely moves relative to the head; a few masks a second suffice.
+        webcamHair: createHairMaskProvider({ minIntervalMs: WEBCAM_HAIR_INTERVAL_MS }),
+      };
     }
     return tools;
   }
@@ -529,20 +591,53 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
       if (faces.length !== 1) return;
       const landmarks = faces[0];
       const anchors = faceAnchorPoints(landmarks, vw, vh);
-      const polygon = buildIdentityPolygon(landmarks, vw, vh);
-      if (!anchors || !polygon) return;
-      const align = faceAlignPoints(landmarks, vw, vh) || anchors;
+      if (!anchors) return;
       const span = Math.hypot(anchors[1].x - anchors[0].x, anchors[1].y - anchors[0].y);
+      // The user's own hair must not ride along on the forehead: keep a hair mask of the webcam
+      // frame too (refreshed when its worker is idle), and only use the tall oval when one exists.
+      let hairMask = false;
+      try {
+        tools.webcamHair.request(webcamSmall, vw, vh, now, anchors);
+        hairMask = tools.webcamHair.fresh(now);
+      } catch {
+        hairMask = false;
+      }
+      if (hairMask) measureHair("webcam", tools.webcamHair, landmarks, now);
+      const polygon = buildIdentityPolygon(landmarks, vw, vh, hairMask ? { browMarginPx: span * IDENTITY_TOP_RATIO } : {});
+      if (!polygon) return;
+      const align = faceAlignPoints(landmarks, vw, vh) || anchors;
       const region = polygonRegion(polygon, vw, vh, Math.round(span * CROP_MARGIN) + 4);
       if (!region) return;
       const cropWidth = Math.max(2, Math.round(region.width * CROP_SCALE));
       const cropHeight = Math.max(2, Math.round(region.height * CROP_SCALE));
       const crop = crops.take(cropWidth, cropHeight);
       crops.context(crop).drawImage(full, region.x, region.y, region.width, region.height, 0, 0, cropWidth, cropHeight);
+      let faceHair = null;
+      if (hairMask) {
+        const scale = region.width / cropWidth;
+        const mask = tools.webcamHair.regionMask(region, anchors, now, scale);
+        if (mask) {
+          const k = cropWidth / region.width;
+          const toCrop = (p) => ({ x: (p.x - region.x) * k, y: (p.y - region.y) * k });
+          const brow = foreheadFade(landmarks, vw, vh, { startPx: 0, endPx: 1 });
+          faceHair = {
+            mask, width: cropWidth, height: Math.ceil(region.height / scale),
+            grow: Math.round(span * WEBCAM_HAIR_GROW_RATIO * k),
+            // Darker-than-skin pixels above the brows (missed wisps, the bangs' shadow) go too.
+            forehead: brow ? {
+              line: { ...toCrop(brow), ux: brow.ux, uy: brow.uy },
+              startPx: span * WEBCAM_SHADOW_START_RATIO * k,
+              skin: SKIN_SAMPLE_INDICES.map((i) => toCrop({ x: landmarks[i].x * vw, y: landmarks[i].y * vh })),
+              darkRatio: WEBCAM_SHADOW_DARK_RATIO,
+              blurPx: Math.max(1, Math.round(span * 0.02 * k)),
+            } : null,
+          };
+        }
+      }
       entries.push({
         id: nextEntryId++, t: now, width: vw, height: vh, landmarks, anchors, align, polygon,
         expr: expressionFeatures(landmarks), crop, region, cropWidth, cropHeight,
-        cropScale: cropWidth / region.width, pixels: null, sent: false,
+        cropScale: cropWidth / region.width, faceHair, pixels: null, sent: false,
       });
       pruneEntries(now);
     }).catch((error) => {
@@ -663,11 +758,12 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
       transform,
       polygon,
       // Never paste beyond Lucy's own face outline (she often draws it slimmer).
-      clipPolygon: buildIdentityPolygon(faces[0], lw, lh),
+      clipPolygon: buildIdentityPolygon(faces[0], lw, lh, { browMarginPx: span * IDENTITY_TOP_RATIO }),
       clipGrow: Math.round(span * CLIP_GROW_RATIO),
       featherRadius: feather,
       blendRadius: Math.round(span * BLEND_RATIO),
       blendStrength: BLEND_STRENGTH,
+      fade: foreheadFade(faces[0], lw, lh, { startPx: span * FADE_START_RATIO, endPx: span * FADE_END_RATIO }),
     };
     const transfer = [base.data.buffer];
     if (hairRegion) transfer.push(hairRegion.buffer);
@@ -676,10 +772,20 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
       if (!entry.sent) {
         job.face = crops.context(entry.crop).getImageData(0, 0, entry.cropWidth, entry.cropHeight).data;
         transfer.push(job.face.buffer);
+        if (entry.faceHair) {
+          job.faceHair = entry.faceHair;
+          transfer.push(entry.faceHair.mask.buffer);
+          entry.faceHair = null;
+        }
         entry.sent = true;
       }
     } else {
-      entry.pixels ||= crops.context(entry.crop).getImageData(0, 0, entry.cropWidth, entry.cropHeight).data;
+      if (!entry.pixels) {
+        entry.pixels = crops.context(entry.crop).getImageData(0, 0, entry.cropWidth, entry.cropHeight).data;
+        const fh = entry.faceHair;
+        if (fh) maskFaceHair(entry.pixels, entry.cropWidth, entry.cropHeight, fh.mask, fh.width, fh.height, fh.grow, fh.forehead);
+        entry.faceHair = null;
+      }
       job.face = entry.pixels;
     }
     let rendered = null;

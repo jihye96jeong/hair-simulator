@@ -6,7 +6,7 @@ import { chromium, expect } from "@playwright/test";
 import sharp from "sharp";
 import { createApp } from "../server.js";
 import { readConfig } from "../lib/config.js";
-import { IMAGE_HAIR_PROMPT, buildHairPrompt } from "../public/hairPrompt.js";
+import { buildHairPrompt, buildImageHairPrompt } from "../public/hairPrompt.js";
 
 const fakeSdk = `
 export const noopLogger = {debug(){}, info(){}, warn(){}, error(){}};
@@ -405,7 +405,8 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   });
   assert.equal(initial.hasImage, true);
   assert.equal(initial.enhance, false);
-  assert.equal(initial.prompt, IMAGE_HAIR_PROMPT);
+  assert.equal(initial.prompt, buildImageHairPrompt(describeSpec));
+  assert.ok(initial.prompt.includes("shoulder-length hair"));
   assert.equal(initial.prompt.includes("see_through"), false);
   assert.equal(initial.prompt.includes("layered cut"), false);
   assert.equal(initial.prompt.includes("ash brown"), false);
@@ -561,7 +562,7 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await expect(labPage.locator("#ref-lab-identity")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-final")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-prompt")).toContainText("enhance=false");
-  await expect(labPage.locator("#ref-lab-prompt")).toContainText(IMAGE_HAIR_PROMPT);
+  await expect(labPage.locator("#ref-lab-prompt")).toContainText("Keep the hairstyle already shown in this attached photo");
   await expect(labPage.locator("#ref-lab-prompt")).toContainText("Lucy live: camera=");
 
   // /lab 모수: refined → /baseline(with mask) once; forehead fail → prefill fallback (no retry)
@@ -698,7 +699,7 @@ test("browser: / and /lab (no params) share hair-preview reference and Lucy init
   assert.ok(root.reference);
   assert.equal(root.reference, labNoParams.reference);
   assert.equal(root.prompt, labNoParams.prompt);
-  assert.equal(root.prompt, IMAGE_HAIR_PROMPT);
+  assert.equal(root.prompt, buildImageHairPrompt(describeSpec));
   assert.equal(root.enhance, false);
   assert.equal(labNoParams.enhance, false);
   assert.equal(root.hasImage, true);
