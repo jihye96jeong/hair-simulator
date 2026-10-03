@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { access, mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { chromium, expect } from "@playwright/test";
 import sharp from "sharp";
 import { createApp } from "../server.js";
@@ -347,6 +348,28 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(issued, 1);
   await expect(page.locator("#ref-live-thumb")).toBeVisible();
   await expect(page.locator("#remaining")).toBeVisible();
+  await expect(page.locator("#output")).toBeVisible();
+  const liveVideo = await page.evaluate(() => {
+    const video = document.getElementById("output");
+    const track = video.srcObject?.getVideoTracks?.()[0];
+    const overlay = document.getElementById("live-face-lock");
+    // The compositor is disabled in tests (canvas stays hidden); measure the box it would occupy.
+    const wasHidden = overlay.hidden;
+    overlay.hidden = false;
+    const vb = video.getBoundingClientRect();
+    const ob = overlay.getBoundingClientRect();
+    overlay.hidden = wasHidden;
+    return {
+      hasStream: Boolean(track),
+      readyState: track?.readyState,
+      sameBox: Math.abs(vb.width - ob.width) < 1 && Math.abs(vb.height - ob.height) < 1 && Math.abs(vb.left - ob.left) < 1 && Math.abs(vb.top - ob.top) < 1,
+      transform: video.style.transform,
+    };
+  });
+  assert.equal(liveVideo.hasStream, true, "live screen shows Lucy's remote stream");
+  assert.equal(liveVideo.readyState, "live");
+  assert.equal(liveVideo.sameBox, true, "composite canvas and Lucy video share one box");
+  assert.equal(liveVideo.transform, "none", "Lucy output is already mirrored by the SDK");
   await assertNoForbidden(page);
   const liveLabels = await visibleActionLabels(page);
   assert.deepEqual(liveLabels.filter((t) => ["캡처", "종료"].includes(t)).sort(), ["캡처", "종료"].sort());
@@ -354,12 +377,10 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   // Masked reference goes to /hair-preview; unmasked original goes to /hair-describe (never Decart).
   assert.ok(lastDescribeImage && lastPreviewReference);
   assert.notDeepEqual(Array.from(lastDescribeImage), Array.from(lastPreviewReference));
-  const maskedStats = await sharp(lastPreviewReference).stats();
-  assert.ok(
-    maskedStats.channels.every((c) => Math.abs(c.mean - 128) < 40) ||
-      (await sharp(lastPreviewReference).raw().toBuffer()).includes(0x80),
-    "preview reference should contain gray face mask",
-  );
+  // The face is masked with a flat skin-tone patch and the reference is upscaled for Gemini.
+  const maskedMeta = await sharp(lastPreviewReference).metadata();
+  assert.equal(maskedMeta.format, "jpeg");
+  assert.ok(maskedMeta.width >= 64 && maskedMeta.height >= 64, JSON.stringify(maskedMeta));
   const posts = await page.evaluate(() => window.__hairPosts);
   const describePost = posts.find((p) => p.url.includes("/hair-describe"));
   const previewPost = posts.find((p) => p.url.includes("/hair-preview"));
@@ -379,6 +400,7 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
       enhance: window.__options.initialState.prompt.enhance,
       prompt: window.__options.initialState.prompt.text,
       imageBytes: buf ? Array.from(buf) : null,
+      mirror: window.__options.mirror,
     };
   });
   assert.equal(initial.hasImage, true);
@@ -389,6 +411,7 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(initial.prompt.includes("ash brown"), false);
   assert.deepEqual(initial.imageBytes, Array.from(previewJpeg));
   assert.notDeepEqual(initial.imageBytes, Array.from(refPng));
+  assert.equal(typeof initial.mirror, "boolean", "mirror is decided from the camera facing mode");
 
   // Same photo retry → no second /hair-preview
   await page.locator("#ref-end").click();
@@ -523,6 +546,8 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await labPage.locator("#ref-consent-check").check();
   await labPage.locator("#ref-start").click();
   await expect(labPage.locator("#ref-live-bar")).toBeVisible({ timeout: 30000 });
+  // /lab splits the UI: the debug panels live in the "LAB 데이터" view.
+  await labPage.locator("#lab-view-data").click();
   await expect(labPage.locator("#ref-lab-debug")).toBeVisible();
   await expect(labPage.locator("#ref-lab-masked")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-selfie")).toHaveAttribute("src", /data:image/);
@@ -534,13 +559,16 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   await expect(labPage.locator("#ref-lab-prompt")).toContainText("crop=3:4");
   await expect(labPage.locator("#ref-lab-prompt")).toContainText("geminiAspect=3:4");
   await expect(labPage.locator("#ref-lab-identity")).toHaveAttribute("src", /data:image/);
+  await expect(labPage.locator("#ref-lab-final")).toHaveAttribute("src", /data:image/);
   await expect(labPage.locator("#ref-lab-prompt")).toContainText("enhance=false");
   await expect(labPage.locator("#ref-lab-prompt")).toContainText(IMAGE_HAIR_PROMPT);
+  await expect(labPage.locator("#ref-lab-prompt")).toContainText("Lucy live: camera=");
 
   // /lab 모수: refined → /baseline(with mask) once; forehead fail → prefill fallback (no retry)
+  await labPage.locator("#lab-view-live").click();
   await labPage.locator("#ref-end").click();
   await labPage.locator("#tab-preset").click();
-  await expect(labPage.locator("#graft-lab-testmode")).toBeVisible();
+  await expect(labPage.locator("#graft-lab-testmode")).toHaveCount(1);
   await expect(labPage.locator("#graft-lab-testmode")).toBeChecked();
   assert.equal(await labPage.locator("#graft-exp-a").count(), 0);
   await labPage.evaluate(() => {
@@ -556,8 +584,10 @@ test("browser: simplified reference flow, reuse, fallback, preset", { timeout: 1
   assert.equal(lastBaselinePose, "front");
   assert.equal(lastBaselineHadMask, true);
   await expect.poll(() => graftFillCalls).toBeGreaterThanOrEqual(fillBeforeLab + 3);
+  await labPage.locator("#lab-view-data").click();
   await expect(labPage.locator("#graft-lab-strip")).toBeVisible();
   await expect(labPage.locator("#graft-lab-save-strips")).toBeVisible();
+  await labPage.locator("#lab-view-live").click();
   const labInitial = await labPage.evaluate(() => ({
     hasImage: "image" in window.__options.initialState,
     size: window.__options.initialState.image?.size || 0,
@@ -713,7 +743,7 @@ test("browser: reference UI state screenshots", { timeout: 120000 }, async (t) =
     await page.route("**/vendor/sdk/index.js", (route) => route.fulfill({ contentType: "application/javascript", body: fakeSdk }));
     await page.goto(base);
     await run(page);
-    await page.screenshot({ path: new URL(`${name}.png`, outDir).pathname, fullPage: false });
+    await page.screenshot({ path: fileURLToPath(new URL(`${name}.png`, outDir)), fullPage: false });
     await context.close();
   }
 

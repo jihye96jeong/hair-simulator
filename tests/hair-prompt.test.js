@@ -75,6 +75,7 @@ test("IMAGE_HAIR_PROMPT locks the attached preview without spec enums", () => {
   assert.ok(IMAGE_HAIR_PROMPT.includes("attached photo"));
   assert.ok(IMAGE_HAIR_PROMPT.includes("Keep the person's face"));
   assert.ok(IMAGE_HAIR_PROMPT.includes("Do not restyle"));
+  assert.ok(IMAGE_HAIR_PROMPT.includes("Do not regenerate, beautify, or replace the face."));
   assert.equal(IMAGE_HAIR_PROMPT.includes("see_through"), false);
   assert.equal(IMAGE_HAIR_PROMPT.includes("layered cut"), false);
   assert.equal(IMAGE_HAIR_PROMPT.includes("ash brown"), false);

@@ -10,6 +10,7 @@ import {
   displayCropToVideo,
   faceGuideEllipse,
   identityCropFromGuide,
+  viewportCropRect,
 } from "../public/selfie.js";
 
 test("faceGuideEllipse matches CSS inset 12% 18%", () => {
@@ -101,4 +102,24 @@ test("clampRect keeps the box inside bounds", () => {
   assert.deepEqual(clampRect(-20, -10, 100, 80, 200, 100), { x: 0, y: 0, w: 100, h: 80 });
   assert.deepEqual(clampRect(150, 40, 100, 80, 200, 100), { x: 100, y: 20, w: 100, h: 80 });
   assert.deepEqual(clampRect(0, 0, 500, 400, 200, 100), { x: 0, y: 0, w: 200, h: 100 });
+});
+
+test("viewportCropRect maintains 3:4 or 2:3 framing centered in container without negative top", () => {
+  const crop34 = viewportCropRect({ elementW: 360, elementH: 480, aspectRatio: "3:4" });
+  assert.equal(crop34.left, 0);
+  assert.equal(crop34.top, 0);
+  assert.equal(crop34.width, 360);
+  assert.equal(crop34.height, 480);
+
+  const cropWide = viewportCropRect({ elementW: 500, elementH: 400, aspectRatio: "3:4" });
+  assert.equal(cropWide.height, 400);
+  assert.equal(cropWide.width, 300);
+  assert.equal(cropWide.left, 100);
+  assert.equal(cropWide.top, 0);
+
+  const cropTall23 = viewportCropRect({ elementW: 360, elementH: 600, aspectRatio: "2:3" });
+  assert.equal(cropTall23.width, 360);
+  assert.equal(cropTall23.height, 540);
+  assert.equal(cropTall23.left, 0);
+  assert.equal(cropTall23.top, 30);
 });

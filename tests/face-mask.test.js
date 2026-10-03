@@ -10,6 +10,7 @@ import {
   buildFaceMaskPolygon,
   computeMaskTopY,
   landmarksToPixels,
+  polygonMeanColor,
 } from "../public/faceMask.js";
 
 function syntheticLandmarks({
@@ -55,6 +56,36 @@ test("buildFaceMaskPolygon stays below brows and follows the oval chin", () => {
   const maxX = Math.max(...polygon.map((p) => p.x));
   const fullWidth = 200 * 0.22 * 2;
   assert.ok(maxX - minX < fullWidth * (1 - MASK_SIDE_INSET / 2), "temples inset so side hair stays");
+});
+
+test("polygonMeanColor averages only pixels inside the polygon and falls back when unreadable", () => {
+  const width = 10;
+  const height = 10;
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      // Left half skin-ish, right half blue.
+      const skin = x < 5;
+      data[o] = skin ? 200 : 0;
+      data[o + 1] = skin ? 150 : 0;
+      data[o + 2] = skin ? 120 : 255;
+      data[o + 3] = 255;
+    }
+  }
+  const ctx = {
+    canvas: { width, height },
+    getImageData: (x0, y0, w, h) => {
+      const out = new Uint8ClampedArray(w * h * 4);
+      for (let y = 0; y < h; y++) out.set(data.subarray(((y0 + y) * width + x0) * 4, ((y0 + y) * width + x0 + w) * 4), y * w * 4);
+      return { data: out };
+    },
+  };
+  const leftSquare = [{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 10 }, { x: 0, y: 10 }];
+  assert.equal(polygonMeanColor(ctx, leftSquare), "rgb(200, 150, 120)");
+  const broken = { canvas: { width, height }, getImageData: () => { throw new Error("tainted"); } };
+  assert.equal(polygonMeanColor(broken, leftSquare), MASK_FILL);
+  assert.equal(polygonMeanColor(ctx, [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }]), MASK_FILL);
 });
 
 test("buildFaceMaskPolygon rejects incomplete landmark sets", () => {

@@ -278,6 +278,20 @@ $("output").addEventListener("click", () => $("output").play().catch(() => {}));
 
 $("tab-reference").addEventListener("click", () => selectTab("reference"));
 $("tab-preset").addEventListener("click", () => selectTab("preset"));
+
+/** /lab only: "체험 화면" shows the normal UI, "LAB 데이터" shows only the debug panels. */
+function selectLabView(view) {
+  const data = view === "data";
+  document.documentElement.classList.toggle("lab-data", data);
+  $("lab-view-live").setAttribute("aria-pressed", String(!data));
+  $("lab-view-data").setAttribute("aria-pressed", String(data));
+  $("lab-data-view").hidden = !data;
+}
+if (lab) {
+  $("lab-views").hidden = false;
+  $("lab-view-live").addEventListener("click", () => selectLabView("live"));
+  $("lab-view-data").addEventListener("click", () => selectLabView("data"));
+}
 document.querySelector(".modes").addEventListener("keydown", (event) => {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
   event.preventDefault();

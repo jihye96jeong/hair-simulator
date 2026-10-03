@@ -2,8 +2,11 @@ import { decodeReferenceBitmap, downscaleBitmap, prepareReferenceUpload, validat
 import { IMAGE_HAIR_PROMPT, REFERENCE_ENHANCE, buildHairPrompt } from "./hairPrompt.js";
 import { CAP_SECONDS, REFERENCE_SESSION_KEY } from "./shared.js";
 import { RealtimeSession } from "./session.js";
-import { openFrontCamera, stopMediaStream } from "./camera.js";
+import { openFrontCamera, stopMediaStream, videoTrackSettings } from "./camera.js";
 import { captureFrame, downloadCapture } from "./capture.js";
+import { lockHairOntoUser } from "./hairFaceLock.js";
+import { startLiveFaceLock } from "./liveFaceLock.js";
+import { createPortraitStream } from "./portraitStream.js";
 import { aspectRatioForLength, createSelfieCapture } from "./selfie.js";
 
 const $ = (id) => document.getElementById(id);
@@ -30,7 +33,11 @@ async function hashImageInput(input) {
   return sha256Prefix8(new TextEncoder().encode(String(input)));
 }
 
-/** Simplified reference hair UI: upload → start → auto capture/preview → Lucy. */
+/**
+ * Simplified reference hair UI: upload → start → auto capture/preview → Lucy live.
+ * On the live screen Lucy's video is shown with the user's own face pasted in, time-synced
+ * to Lucy's delay (see liveFaceLock.js).
+ */
 export function createReferenceFlow({
   isActive,
   reportEnd,
@@ -42,6 +49,10 @@ export function createReferenceFlow({
 }) {
   let uiState = "idle";
   let camera = null;
+  let portrait = null;
+  let liveFace = null;
+  let remoteVideo = null;
+  let liveInfo = { camera: "", input: "", mirror: false, output: "", sync: "" };
   let cameraEpoch = 0;
   let session = null;
   let connecting = false;
@@ -57,8 +68,11 @@ export function createReferenceFlow({
   let describeError = null;
   let selfieDataUrl = "";
   let identityDataUrl = "";
+  let angleDataUrl = "";
   let previewBlob = null;
   let previewDataUrl = "";
+  let geminiPreviewDataUrl = "";
+  let lockedMaskDataUrl = "";
   let previewScores = [];
   let previewSelectedIndex = null;
   let previewCandidates = [];
@@ -193,13 +207,22 @@ export function createReferenceFlow({
     attachLabMediaActions(selfieFig, "1 selfie crop", "01-selfie.jpg");
     const identityFig = mkFigure("ref-lab-identity", "얼굴 클로즈업");
     attachLabMediaActions(identityFig, "1b identity close-up", "01b-identity.jpg");
+    const compositeFig = mkFigure("ref-lab-composite", "Gemini 선택본");
+    attachLabMediaActions(compositeFig, "3 selected Gemini preview (face-lock base)", "03-gemini-selected.jpg");
+    const maskFig = mkFigure("ref-lab-refine-mask", "얼굴 고정 마스크");
+    attachLabMediaActions(maskFig, "3b face-lock mask (white = webcam face pixels)", "03b-face-mask.png");
+    const finalFig = mkFigure("ref-lab-final", "Lucy 입력");
+    attachLabMediaActions(finalFig, "4 final still sent to Lucy", "04-lucy-input.jpg");
     const candidatesEl = document.createElement("div");
     candidatesEl.id = "ref-lab-candidates";
     candidatesEl.className = "ref-lab-candidates";
     const promptEl = document.createElement("pre");
     promptEl.id = "ref-lab-prompt";
-    panel.append(maskedFig, selfieFig, identityFig, candidatesEl, promptEl);
-    $("stage").insertAdjacentElement("afterend", panel);
+    const title = document.createElement("h2");
+    title.className = "graft-lab-title";
+    title.textContent = "헤어 /lab";
+    panel.append(title, maskedFig, selfieFig, identityFig, candidatesEl, compositeFig, maskFig, finalFig, promptEl);
+    ($("lab-data-view") || $("stage").parentElement).append(panel);
     labDebug = panel;
     return panel;
   }
@@ -217,6 +240,9 @@ export function createReferenceFlow({
     setSrc("#ref-lab-masked", maskedReferenceDataUrl);
     setSrc("#ref-lab-selfie", selfieDataUrl);
     setSrc("#ref-lab-identity", identityDataUrl);
+    setSrc("#ref-lab-composite", geminiPreviewDataUrl);
+    setSrc("#ref-lab-refine-mask", lockedMaskDataUrl);
+    setSrc("#ref-lab-final", previewDataUrl);
     const candidatesEl = panel.querySelector("#ref-lab-candidates");
     const promptEl = panel.querySelector("#ref-lab-prompt");
     candidatesEl.innerHTML = "";
@@ -237,18 +263,20 @@ export function createReferenceFlow({
       });
       attachLabMediaActions(
         wrap,
-        `2 candidate #${cand.index}${cand.selected || cand.index === previewSelectedIndex ? " ← selected" : ""} match=${cand.hairMatch}/3\n${lines.join("\n")}`,
+        `2 candidate #${cand.index}${cand.selected || cand.index === previewSelectedIndex ? " ← selected" : ""} sim=${cand.similarity ?? "—"}/10 match=${cand.hairMatch}/3\n${lines.join("\n")}`,
         `candidate-${cand.index}.jpg`,
       );
       candidatesEl.append(wrap);
     }
-    const promptText = prompt ?? lastLucyPrompt;
-    const enhanceVal = enhance ?? lastLucyEnhance;
     const length = hairSpec?.length || "—";
     const cropAspect = captureAspectRatio || (hairSpec?.length ? aspectRatioForLength(hairSpec.length) : "—");
     const geminiAspect = hairSpec?.length ? aspectRatioForLength(hairSpec.length) : "—";
+    const promptText = prompt ?? lastLucyPrompt;
+    const enhanceVal = enhance ?? lastLucyEnhance;
     promptEl.textContent = [
       `spec.length=${length} crop=${cropAspect} geminiAspect=${geminiAspect}`,
+      `5 Lucy live: camera=${liveInfo.camera || "—"} input=${liveInfo.input || "—"} mirror=${liveInfo.mirror} output=${liveInfo.output || "—"}`,
+      `5b face sync: ${liveInfo.sync || "—"}`,
       `3 Lucy prompt / enhance`,
       `enhance=${enhanceVal}`,
       promptText,
@@ -316,7 +344,8 @@ export function createReferenceFlow({
     $("connection-state").hidden = true;
     $("expected-chip").hidden = true;
     $("resolution").hidden = true;
-    showLabDebug(next === "live" || (isLab && previewCandidates.length > 0));
+    // Data stays visible in the LAB 데이터 view after the session ends.
+    showLabDebug(next === "live" || (isLab && (previewCandidates.length > 0 || Boolean(selfieDataUrl))));
     if (next === "capture" || next === "generating" || next === "live") hideBanner();
     updateButtons();
   }
@@ -324,6 +353,8 @@ export function createReferenceFlow({
   function invalidatePreview() {
     previewBlob = null;
     previewDataUrl = "";
+    geminiPreviewDataUrl = "";
+    lockedMaskDataUrl = "";
     previewScores = [];
     previewSelectedIndex = null;
     previewCandidates = [];
@@ -331,6 +362,7 @@ export function createReferenceFlow({
     previewFailCount = 0;
     captureAspectRatio = "";
     identityDataUrl = "";
+    angleDataUrl = "";
   }
 
   function resetDescribe() {
@@ -373,15 +405,40 @@ export function createReferenceFlow({
 
   function stopCamera() {
     cameraEpoch++;
+    liveFace?.stop();
+    liveFace = null;
+    portrait?.stop();
+    portrait = null;
     stopMediaStream(camera);
     camera = null;
+    $("live-face-lock").hidden = true;
+    if (remoteVideo) {
+      remoteVideo.pause();
+      remoteVideo.srcObject = null;
+      remoteVideo.remove();
+      remoteVideo = null;
+    }
   }
 
-  function showLiveStream(stream, { remote = false } = {}) {
+  /** Hidden <video> that plays Lucy's remote stream for the face-sync compositor. */
+  function ensureRemoteVideo() {
+    if (remoteVideo) return remoteVideo;
+    remoteVideo = document.createElement("video");
+    remoteVideo.muted = true;
+    remoteVideo.playsInline = true;
+    remoteVideo.autoplay = true;
+    remoteVideo.setAttribute("aria-hidden", "true");
+    remoteVideo.style.cssText = "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:0";
+    document.body.appendChild(remoteVideo);
+    return remoteVideo;
+  }
+
+  /** Lucy's output on screen (already mirrored by the SDK); the composite canvas shares its box. */
+  function showLiveStream(stream) {
     const video = $("output");
     video.hidden = false;
     video.srcObject = stream;
-    video.style.transform = remote ? "none" : "scaleX(-1)";
+    video.style.transform = "none";
     void video.play().catch(() => undefined);
   }
 
@@ -530,6 +587,7 @@ export function createReferenceFlow({
       editModel: opts.editmodel || undefined,
     };
     if (identityDataUrl) payload.identity = identityDataUrl;
+    if (angleDataUrl) payload.angle = angleDataUrl;
     const response = await fetch("/hair-preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -553,11 +611,40 @@ export function createReferenceFlow({
     }
     previewDataUrl = body.image;
     previewBlob = await (await fetch(previewDataUrl)).blob();
+    geminiPreviewDataUrl = previewDataUrl;
+    if (uploadSeq !== uploadAtStart) return null;
+    const locked = await lockFaceOnPreview(uploadAtStart);
+    if (uploadSeq !== uploadAtStart) return null;
+    if (locked) {
+      previewDataUrl = locked.dataUrl;
+      previewBlob = locked.blob;
+    }
     previewFailCount = 0;
     updateLabDebug();
     return previewBlob;
   }
 
+  /**
+   * Face lock: Gemini's styled frame keeps its hair and hairline; the webcam face
+   * (brows to jaw) is aligned and blended back so the features are the user's own pixels.
+   * Any failure keeps the plain Gemini preview.
+   */
+  async function lockFaceOnPreview(uploadAtStart) {
+    const locked = await lockHairOntoUser({
+      personDataUrl: selfieDataUrl,
+      styledBlob: previewBlob,
+    }).catch(() => null);
+    if (!locked?.blob || uploadSeq !== uploadAtStart) return null;
+    lockedMaskDataUrl = locked.maskDataUrl;
+    return { dataUrl: locked.dataUrl, blob: locked.blob };
+  }
+
+  /**
+   * Lucy live: the webcam (as a 9:16 portrait stream, same framing as the capture step) goes to
+   * Lucy with the face-locked preview as the style image. Lucy's output is shown on screen and
+   * the face-sync compositor pastes the user's own face from the matching webcam moment on top,
+   * so the features are the user's and move together with Lucy's hair.
+   */
   async function connectLucy({ useImage, prompt, imageBlob, seq, uploadAtStart }) {
     connecting = true;
     updateButtons();
@@ -565,14 +652,30 @@ export function createReferenceFlow({
     try {
       const sdk = await import("@decartai/sdk");
       const model = sdk.models.realtime("lucy-2.5");
-      const stream = await openFrontCamera(model);
+      const stream = await openFrontCamera(model, { portrait: true });
       if (epoch !== cameraEpoch || !isActive() || document.hidden || seq !== runSeq || uploadSeq !== uploadAtStart) {
         stopMediaStream(stream);
         return;
       }
       camera = stream;
+      const cameraSettings = videoTrackSettings(stream);
+      const cameraIsPortrait = Number(cameraSettings.height) > Number(cameraSettings.width);
+      portrait = cameraIsPortrait
+        ? { stream, portrait: true, source: "camera", stop() {} }
+        : { ...createPortraitStream(stream), source: "crop" };
+      const lucyInput = portrait.stream;
+      // Mirror unless the camera says it faces away from the user.
+      const mirror = cameraSettings.facingMode !== "environment";
+      liveInfo = {
+        camera: `${cameraSettings.width || "?"}×${cameraSettings.height || "?"}`,
+        input: portrait.source,
+        mirror,
+        output: "",
+        sync: "",
+      };
       setUiState("live");
-      showLiveStream(stream, { remote: false });
+      // The compositor draws in webcam orientation; flip the canvas the same way the SDK mirrors Lucy.
+      $("live-face-lock").style.transform = mirror ? "scaleX(-1)" : "none";
 
       const active = new RealtimeSession({
         mode: "ref",
@@ -591,7 +694,30 @@ export function createReferenceFlow({
         },
         onRemote: (remote) => {
           if (!isActive() || active.stopped || uiState !== "live") return;
-          showLiveStream(remote, { remote: true });
+          showLiveStream(remote);
+          const styledVideo = ensureRemoteVideo();
+          styledVideo.srcObject = remote;
+          void styledVideo.play().catch(() => undefined);
+          const noteOutput = () => {
+            if (styledVideo.videoWidth > 0) {
+              liveInfo.output = `${styledVideo.videoWidth}×${styledVideo.videoHeight}`;
+              updateLabDebug();
+            }
+          };
+          styledVideo.addEventListener("loadedmetadata", noteOutput, { once: true });
+          noteOutput();
+          liveFace?.stop();
+          liveFace = startLiveFaceLock({
+            sourceStream: lucyInput,
+            styledVideo,
+            canvas: $("live-face-lock"),
+            mirror,
+            onStats: (stats) => {
+              const timing = Object.entries(stats.timing || {}).map(([k, v]) => `${k}=${v}ms`).join(" ");
+              liveInfo.sync = `latency=${stats.latencyMs}ms lucy=${stats.lucyFps}fps composite=${stats.compositeFps}fps cam=${stats.webcamFps}fps misses=${stats.misses} dropped=${stats.dropped} [${stats.mode || "…"}] ${timing}${stats.lastError ? ` err=${stats.lastError}` : ""}`;
+              updateLabDebug();
+            },
+          });
         },
         onError: (message) => {
           if (!isActive()) return;
@@ -614,17 +740,18 @@ export function createReferenceFlow({
       lastLucyEnhance = REFERENCE_ENHANCE;
       updateLabDebug({ prompt, enhance: lastLucyEnhance });
       await logPipelineTrace({ useImage, prompt, imageBlob });
+      console.info("ref-live-input", liveInfo);
       const initialState = useImage
         ? { prompt: { text: prompt, enhance: REFERENCE_ENHANCE }, image: imageBlob }
         : { prompt: { text: prompt, enhance: REFERENCE_ENHANCE } };
-      await active.start(camera, async () => {
+      await active.start(lucyInput, async () => {
         const response = await fetch("/token", { method: "POST" });
         const body = await response.json();
         if (!response.ok) throw { publicMessage: body.error };
         return body;
       }, (media, options, token) => sdk.createDecartClient({ apiKey: token, logger: sdk.noopLogger }).realtime.connect(media, options), {
         model: sdk.models.realtime("lucy-2.5"),
-        mirror: "auto",
+        mirror,
         resolution: "720p",
         initialState,
       });
@@ -696,6 +823,7 @@ export function createReferenceFlow({
       }
 
       const shot = await selfie.capture({ length: hairSpec.length });
+      angleDataUrl = "";
       captureAspectRatio = shot.aspectRatio || aspectRatioForLength(hairSpec.length);
       selfieDataUrl = shot.dataUrl;
       identityDataUrl = shot.identityDataUrl || "";
@@ -765,7 +893,10 @@ export function createReferenceFlow({
 
   function captureResult() {
     try {
-      const canvas = captureFrame($("output"), "레퍼런스 헤어");
+      // The compositor canvas is drawn in webcam orientation; flip it to match the mirrored Lucy output.
+      const canvas = captureFrame($("output"), "레퍼런스 헤어", liveFace?.active() ? $("live-face-lock") : null, {
+        overlayMirror: liveInfo.mirror,
+      });
       captureCanvas = canvas;
       session?.stop("capture", true);
       stopCamera();

@@ -33,6 +33,15 @@
       <button type="button" id="tab-preset" aria-pressed="false">모수</button>
     </div>
 
+    <!-- /lab 전용: 체험 화면과 LAB 데이터를 분리해서 본다 -->
+    <div class="modes lab-views" id="lab-views" role="group" aria-label="보기" hidden>
+      <button type="button" id="lab-view-live" aria-pressed="true">체험 화면</button>
+      <button type="button" id="lab-view-data" aria-pressed="false">LAB 데이터</button>
+    </div>
+    <section id="lab-data-view" class="lab-data-view" aria-label="LAB 데이터" hidden>
+      <p id="lab-data-empty" class="fine">아직 데이터가 없어요. 체험 화면에서 체험을 시작하면 단계별 이미지가 여기에 쌓입니다.</p>
+    </section>
+
     <p id="error" class="notice error" role="alert" hidden></p>
 
     <div class="stage" id="stage">
@@ -49,6 +58,7 @@
       </div>
 
       <video id="output" autoplay playsinline muted hidden></video>
+      <canvas id="live-face-lock" hidden></canvas>
       <img id="captured-image" class="result" alt="" hidden>
       <button type="button" id="graft-hold-baseline" class="graft-hold-original is-hidden">시술 전</button>
       <div id="graft-baseline-banner" class="ref-stage-banner" hidden>
@@ -93,7 +103,7 @@
         <p id="ref-stage-message"></p>
         <button type="button" id="ref-stage-action" hidden></button>
       </div>
-      <!-- /lab 디버그 패널은 referenceFlow가 isLab일 때만 #ref-lab-debug로 주입 -->
+      <!-- /lab 디버그 패널(#ref-lab-debug, #graft-lab-debug)은 #lab-data-view에 주입 -->
 
       <p id="stage-label" hidden>연결을 누르면 카메라가 켜집니다</p>
       <span id="combo-label" class="chip top-left" hidden>헤어라인 · 부분</span>

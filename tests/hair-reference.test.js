@@ -31,7 +31,11 @@ test("Decart image path only uses preview blob, never raw reference upload varia
   const session = await readFile(new URL("../public/session.js", import.meta.url), "utf8");
   assert.ok(session.includes("setHairReference"));
   assert.ok(session.includes("setHairPrompt"));
+  assert.ok(flow.includes("RealtimeSession"));
   assert.ok(flow.includes("image: imageBlob"));
+  // Lucy's output is shown with the user's own face pasted in sync (browser-side compositor).
+  assert.ok(flow.includes("startLiveFaceLock"));
+  assert.match(flow, /sourceStream:\s*lucyInput/);
   assert.equal(flow.includes("image: referenceDataUrl"), false);
   assert.equal(flow.includes("image: originalUrl"), false);
   assert.ok(flow.includes("/hair-preview"));
@@ -39,5 +43,9 @@ test("Decart image path only uses preview blob, never raw reference upload varia
   assert.ok(flow.includes("maskedReferenceDataUrl"));
   assert.ok(flow.includes("reference: maskedReferenceDataUrl"));
   assert.equal(flow.includes("restoreFaceOnPreview"), false);
+  // Face lock runs in the browser only; no server refine round-trip.
+  assert.ok(flow.includes("lockHairOntoUser"));
+  assert.equal(flow.includes("/hair-refine"), false);
+  assert.ok(flow.includes("previewBlob = locked.blob"));
   assert.ok(flow.includes("previewDataUrl"));
 });

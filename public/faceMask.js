@@ -96,7 +96,59 @@ export function buildFaceMaskPolygon(landmarks, width, height) {
   return polygon;
 }
 
-export function fillMaskPolygon(ctx, polygon, fill = MASK_FILL) {
+/**
+ * Mean color of the pixels inside the polygon (the covered skin), as a CSS color.
+ * A flat gray patch tends to be copied by the image model as gray smudges around
+ * the hairline; a skin-toned patch hides the face just as well without that.
+ */
+export function polygonMeanColor(ctx, polygon, fallback = MASK_FILL) {
+  const xs = polygon.map((p) => p.x);
+  const ys = polygon.map((p) => p.y);
+  const x0 = Math.max(0, Math.floor(Math.min(...xs)));
+  const y0 = Math.max(0, Math.floor(Math.min(...ys)));
+  const x1 = Math.min(ctx.canvas.width, Math.ceil(Math.max(...xs)));
+  const y1 = Math.min(ctx.canvas.height, Math.ceil(Math.max(...ys)));
+  if (x1 <= x0 || y1 <= y0) return fallback;
+  let data;
+  try {
+    data = ctx.getImageData(x0, y0, x1 - x0, y1 - y0).data;
+  } catch {
+    return fallback;
+  }
+  const width = x1 - x0;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      if (!pointInPolygon(x + 0.5, y + 0.5, polygon)) continue;
+      const o = ((y - y0) * width + (x - x0)) * 4;
+      r += data[o];
+      g += data[o + 1];
+      b += data[o + 2];
+      n += 1;
+    }
+  }
+  if (!n) return fallback;
+  return `rgb(${Math.round(r / n)}, ${Math.round(g / n)}, ${Math.round(b / n)})`;
+}
+
+function pointInPolygon(x, y, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersect = ((yi > y) !== (yj > y))
+      && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+export function fillMaskPolygon(ctx, polygon, fill = polygonMeanColor(ctx, polygon)) {
   ctx.fillStyle = fill;
   ctx.beginPath();
   ctx.moveTo(polygon[0].x, polygon[0].y);
@@ -111,22 +163,38 @@ export function faceCountError() {
   return error;
 }
 
+async function createLandmarker(runningMode, numFaces) {
+  const { FaceLandmarker, FilesetResolver } = await import("@mediapipe/tasks-vision");
+  const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_PATH);
+  return FaceLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: FACE_LANDMARKER_MODEL_PATH,
+      delegate: "CPU",
+    },
+    runningMode,
+    numFaces,
+  });
+}
+
 async function getLandmarker() {
-  if (!landmarkerPromise) {
-    landmarkerPromise = (async () => {
-      const { FaceLandmarker, FilesetResolver } = await import("@mediapipe/tasks-vision");
-      const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_PATH);
-      return FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: FACE_LANDMARKER_MODEL_PATH,
-          delegate: "CPU",
-        },
-        runningMode: "IMAGE",
-        numFaces: 2,
-      });
-    })();
-  }
+  if (!landmarkerPromise) landmarkerPromise = createLandmarker("IMAGE", 2);
   return landmarkerPromise;
+}
+
+/**
+ * A video-mode landmarker with its own tracking state. Two detectors are needed
+ * when reading two streams (webcam and Lucy output) at once.
+ */
+export async function createVideoFaceDetector() {
+  const landmarker = await createLandmarker("VIDEO", 1);
+  let lastTs = -1;
+  return {
+    detect(source, timestampMs) {
+      const ts = Math.max(lastTs + 1, Math.round(timestampMs));
+      lastTs = ts;
+      return landmarker.detectForVideo(source, ts).faceLandmarks || [];
+    },
+  };
 }
 
 /** Returns an array of face landmark lists (normalized). Test hook: globalThis.__testDetectFaces. */

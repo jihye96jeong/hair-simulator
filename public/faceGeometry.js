@@ -475,6 +475,66 @@ async function segmentLabels(canvas) {
   });
 }
 
+/**
+ * Video-mode hair segmenter with its own state (one per stream).
+ * `segment(source, timestampMs, width, height)` returns a Uint8Array hair mask (1 = hair)
+ * resized to width×height, or null when no mask is produced.
+ * Test hook: globalThis.__testSegmentSelfie (returns a mask at the source size).
+ */
+export async function createVideoHairSegmenter() {
+  if (typeof globalThis.__testSegmentSelfie === "function") {
+    return {
+      async segment(source) { return globalThis.__testSegmentSelfie(source); },
+      close() {},
+    };
+  }
+  const vision = await import("@mediapipe/tasks-vision");
+  const files = await vision.FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_PATH);
+  const segmenter = await vision.ImageSegmenter.createFromOptions(files, {
+    baseOptions: { modelAssetPath: SELFIE_SEGMENTER_MODEL_PATH, delegate: "CPU" },
+    runningMode: "VIDEO",
+    outputCategoryMask: true,
+    outputConfidenceMasks: false,
+  });
+  let lastTs = -1;
+  return {
+    segment(source, timestampMs, width, height) {
+      const ts = Math.max(lastTs + 1, Math.round(timestampMs));
+      lastTs = ts;
+      const result = segmenter.segmentForVideo(source, ts);
+      const mask = result?.categoryMask;
+      if (!mask) return null;
+      try {
+        const labels = mask.getAsUint8Array
+          ? mask.getAsUint8Array()
+          : new Uint8Array(mask.getAsFloat32Array().map((v) => Math.round(v)));
+        const hair = categoryMaskFromLabels(labels, mask.width, mask.height, SEG_HAIR);
+        if (mask.width === width && mask.height === height) return hair;
+        return resizeMaskNearest(hair, mask.width, mask.height, width, height);
+      } finally {
+        try { mask.close?.(); } catch { /* ignore */ }
+      }
+    },
+    close() {
+      try { segmenter.close?.(); } catch { /* ignore */ }
+    },
+  };
+}
+
+/** Hair category mask (1 = hair) at the source image size. */
+export async function segmentSelfieHair(source) {
+  if (typeof globalThis.__testSegmentSelfie === "function") {
+    return globalThis.__testSegmentSelfie(source);
+  }
+  const { canvas, width, height } = canvasFromVideoOrImage(source);
+  const seg = await segmentLabels(canvas);
+  let labels = seg.labels;
+  if (seg.width !== width || seg.height !== height) {
+    labels = resizeMaskNearest(labels, seg.width, seg.height, width, height);
+  }
+  return categoryMaskFromLabels(labels, width, height, SEG_HAIR);
+}
+
 export async function measureFrame(source, { pose = "front", skipForeheadCheck = false } = {}) {
   // Browser/unit test hook: skip MediaPipe wasm when a deterministic stub is installed.
   if (typeof globalThis.__testGraftMeasure === "function") {

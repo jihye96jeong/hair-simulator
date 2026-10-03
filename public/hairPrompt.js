@@ -1,7 +1,7 @@
 export const REFERENCE_ENHANCE = false;
 
 /** Lucy prompt when a Gemini preview image is attached. Lock the attached preview; do not restyle. */
-export const IMAGE_HAIR_PROMPT = "Keep the hairstyle already shown in this attached photo, including the front hair direction, fringe, part, forehead coverage, side length, top silhouette, texture, volume, and color. Do not restyle or reinterpret the hair. The hair grows from the person's own scalp and moves naturally with their head. Keep the person's face, eyes, eyebrows, nose, mouth, jaw, ears, neck, skin, expression, clothing, background, and identity unchanged.";
+export const IMAGE_HAIR_PROMPT = "Keep the hairstyle already shown in this attached photo, including the front hair direction, fringe, part, forehead coverage, side length, top silhouette, texture, volume, and color. Do not restyle or reinterpret the hair. The hair grows from the person's own scalp and moves naturally with their head. Keep the person's face, eyes, eyebrows, nose, mouth, jaw, ears, neck, skin, expression, clothing, background, and identity unchanged. Do not regenerate, beautify, or replace the face.";
 
 export const HAIR_LENGTHS = Object.freeze(["buzz", "very_short", "short", "chin", "shoulder", "chest", "long"]);
 export const HAIR_BANGS = Object.freeze(["none", "see_through", "full", "side_swept", "curtain"]);

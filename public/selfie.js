@@ -44,6 +44,28 @@ export function faceGuideEllipse(elementW, elementH) {
 }
 
 /**
+ * Viewport-matching crop rect in element coordinates.
+ * Keeps the visual distance/framing that the user saw during the live webcam countdown,
+ * avoiding abrupt zoom-ins on the result screen.
+ */
+export function viewportCropRect({ elementW, elementH, aspectRatio = "3:4" } = {}) {
+  const targetAspect = aspectRatio === "2:3" ? (2 / 3) : (3 / 4);
+  const elementAspect = elementW / elementH;
+  let width;
+  let height;
+  if (elementAspect > targetAspect) {
+    height = elementH;
+    width = height * targetAspect;
+  } else {
+    width = elementW;
+    height = width / targetAspect;
+  }
+  const left = (elementW - width) / 2;
+  const top = (elementH - height) / 2;
+  return { left, top, width, height };
+}
+
+/**
  * Face-centered crop in element coordinates, anchored above the guide ellipse.
  * Default 3:4; chest/long styles use 2:3 by extending downward.
  */
@@ -154,7 +176,7 @@ export function createSelfieCapture({ video, overlay, onStatus = () => {} } = {}
     if (overlay) overlay.hidden = true;
   }
 
-  async function capture({ length } = {}) {
+  async function captureFrameData({ length } = {}) {
     if (!video || !video.videoWidth) {
       const error = new Error("카메라 화면을 아직 준비하지 못했어요.");
       error.code = "selfie-not-ready";
@@ -168,7 +190,7 @@ export function createSelfieCapture({ video, overlay, onStatus = () => {} } = {}
     const videoW = video.videoWidth;
     const videoH = video.videoHeight;
     const ellipse = faceGuideEllipse(elementW, elementH);
-    const cropDisplay = cropRectFromGuide(ellipse, { aspectRatio });
+    const cropDisplay = viewportCropRect({ elementW, elementH, aspectRatio });
     const identityDisplay = identityCropFromGuide(ellipse);
     const src = displayCropToVideo({
       crop: cropDisplay,
@@ -219,7 +241,6 @@ export function createSelfieCapture({ video, overlay, onStatus = () => {} } = {}
       0, 0, IDENTITY_OUT_SIZE, IDENTITY_OUT_SIZE,
     );
     const identityDataUrl = identityCanvas.toDataURL("image/jpeg", SELFIE_JPEG_QUALITY);
-    stop();
     return {
       dataUrl,
       identityDataUrl,
@@ -229,6 +250,12 @@ export function createSelfieCapture({ video, overlay, onStatus = () => {} } = {}
       crop: src,
       identityCrop: identitySrc,
     };
+  }
+
+  async function capture({ length } = {}) {
+    const shot = await captureFrameData({ length });
+    stop();
+    return shot;
   }
 
   return {

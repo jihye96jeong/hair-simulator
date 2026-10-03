@@ -89,13 +89,30 @@ button:focus-visible,
 }
 
 .stage video,
-.stage img.result {
+.stage img.result,
+#live-face-lock {
   width: 100%;
   height: 100%;
   object-fit: contain;
   background: #08090d;
   display: block;
 }
+
+/* The live video and its hair overlay must share one box so their `contain` scaling matches.
+   As a grid item the video's intrinsic 9:16 height could grow the row past the stage. */
+.stage > #output,
+.stage > img.result,
+#live-face-lock {
+  position: absolute;
+  inset: 0;
+}
+
+#live-face-lock {
+  pointer-events: none;
+  background: transparent;
+}
+
+#live-face-lock[hidden] { display: none; }
 
 #stage-label {
   position: absolute;
@@ -221,6 +238,7 @@ button:focus-visible,
   color: #f4f5f7;
   font-size: 12px;
 }
+.graft-hold-original.is-hidden { display: none !important; }
 .graft-lab-still {
   display: grid;
   gap: 10px;
@@ -442,6 +460,9 @@ button.ref-change {
   box-shadow: inset 0 0 0 999px rgb(8 9 13 / 18%);
   z-index: 2;
 }
+#selfie-guide {
+  inset: 15% 20% 20% 20%;
+}
 .ref-overlay-text {
   position: absolute;
   left: 0;
@@ -524,9 +545,52 @@ button.ref-change {
   display: none !important;
 }
 .ref-lab-debug .ref-lab-candidates,
-.ref-lab-debug pre {
+.ref-lab-debug pre,
+.ref-lab-debug .graft-lab-title {
   grid-column: 1 / -1;
 }
+
+/* /lab: LAB 데이터 view. The stage and controls are hidden; panels get the full height. */
+.lab-views[hidden] { display: none; }
+.lab-data-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.lab-data-view[hidden] { display: none; }
+.lab-data-view:has(> .ref-lab-debug:not([hidden])) > #lab-data-empty { display: none; }
+.lab-data-view .ref-lab-debug,
+.lab-data-view .ref-lab-debug.ref-lab-debug {
+  max-height: none;
+  overflow: visible;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  font-size: 12px;
+}
+.lab-data-view .ref-lab-candidates {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+.lab-data-view .ref-lab-candidate figcaption { font-size: 11px; }
+.lab-data-view .ref-lab-debug pre { max-height: none; }
+html.lab-data #error,
+html.lab-data #stage,
+html.lab-data #ref-bottom,
+html.lab-data #preset-bar,
+html.lab-data #preset-actions,
+html.lab-data #graft-disclaimer,
+html.lab-data #status,
+html.lab-data #billing-note,
+html.lab-data #product-actions,
+html.lab-data #lab-actions,
+html.lab-data #time-bar {
+  display: none !important;
+}
+html.lab-data main { overflow: hidden; }
 .ref-lab-debug figure {
   margin: 0;
 }
@@ -576,6 +640,7 @@ button.ref-change {
 .ref-lab-debug {
   max-height: min(48vh, 420px);
 }
+.lab-data-view > .ref-lab-debug { max-height: none; }
 .ref-lab-copy:hover,
 .ref-lab-download:hover {
   background: #3a4254;

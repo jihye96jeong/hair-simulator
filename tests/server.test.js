@@ -94,6 +94,13 @@ test("global quota returns 503 and cross-origin requests are rejected", async (t
   assert.equal((await f.post("/token")).status, 200);
   assert.equal((await f.post("/token")).status, 503);
 });
+test("DISABLE_QUOTA allows unlimited requests without 429", async (t) => {
+  const f = await fixture(t, { env: { DISABLE_QUOTA: "true", TOKEN_DAILY_IP_LIMIT: "1" } });
+  for (let i = 0; i < 5; i++) {
+    const response = await f.post("/token");
+    assert.equal(response.status, 200);
+  }
+});
 test("failed token issuance rolls back quota and returns sanitized errors", async (t) => {
   const f = await fixture(t, { env: { TOKEN_DAILY_IP_LIMIT: "1" }, decart: { tokens: { create: async () => { throw new Error("secret must not leak"); } } } });
   for (let i = 0; i < 2; i++) {

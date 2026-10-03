@@ -18,7 +18,9 @@ test("buildEditParts uses person, optional identity, reference, then instruction
   assert.ok(parts[4].text.includes("Match precisely: front hair direction"));
   assert.equal(parts[4].text.includes("Target hairstyle:"), false);
   assert.ok(parts[4].text.includes("Completely remove the person's current hair"));
-  assert.ok(parts[4].text.includes("intentionally covered with gray"));
+  assert.ok(parts[4].text.includes("Do not move, zoom, or reshape the face."));
+  assert.ok(parts[4].text.includes("intentionally covered with a flat skin-tone patch"));
+  assert.equal(parts[4].text.includes("covered with gray"), false);
   assert.equal(parts.length, 5);
 
   const withIdentity = buildEditParts({
@@ -32,6 +34,17 @@ test("buildEditParts uses person, optional identity, reference, then instruction
   assert.ok(withIdentity.at(-1).text.startsWith("Edit the PERSON PHOTO"));
   assert.ok(withIdentity.at(-1).text.includes("The output face must match the IDENTITY CLOSE-UP exactly."));
   assert.ok(HAIR_EDIT_INSTRUCTION.includes("HAIRSTYLE REFERENCE"));
+
+  const withAngle = buildEditParts({
+    personB64: "cGVyc29u",
+    referenceB64: "cmVm",
+    identityB64: "aWRlbnRpdHk=",
+    angleB64: "YW5nbGU=",
+  });
+  assert.equal(withAngle.length, 9);
+  assert.equal(withAngle[4].text, "PERSON HEAD & HAIRLINE ANGLE PHOTO (same person, crown/angle view):");
+  assert.equal(withAngle[5].inlineData.data, "YW5nbGU=");
+  assert.ok(withAngle.at(-1).text.includes("PERSON HEAD & HAIRLINE ANGLE PHOTO"));
 });
 
 test("gemini editor config passes imageConfig.aspectRatio through", async () => {

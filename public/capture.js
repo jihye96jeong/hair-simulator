@@ -1,11 +1,23 @@
-export function captureFrame(video, comboLabel) {
-  if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) throw new Error("영상이 준비된 후 다시 눌러 주세요.");
+export function captureFrame(video, comboLabel, overlay = null, { overlayMirror = false } = {}) {
+  const width = video.videoWidth || video.width;
+  const height = video.videoHeight || video.height;
+  const playing = video.readyState === undefined || video.readyState >= 2;
+  if (!playing || !width || !height) throw new Error("영상이 준비된 후 다시 눌러 주세요.");
   const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  canvas.width = width;
+  canvas.height = height;
   const context = canvas.getContext("2d");
   // Remote output is already mirrored by the SDK. Apply no extra CSS/canvas flip.
   context.drawImage(video, 0, 0);
+  if (overlay?.width && overlay?.height) {
+    context.save();
+    if (overlayMirror) {
+      context.translate(width, 0);
+      context.scale(-1, 1);
+    }
+    context.drawImage(overlay, 0, 0, width, height);
+    context.restore();
+  }
   const font = Math.max(18, Math.round(canvas.width / 40));
   const pad = Math.round(canvas.width / 50);
   context.font = `600 ${font}px sans-serif`;

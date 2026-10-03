@@ -66,12 +66,12 @@ export async function createApp({
   const app = express();
   app.disable("x-powered-by");
   if (config.trustProxy) app.set("trust proxy", config.trustProxy);
-  const quota = new DailyQuota({ ...config, now });
-  const describeQuota = new DailyQuota({ ipLimit: config.describeIpLimit, totalLimit: config.describeTotalLimit, now });
-  const previewQuota = new DailyQuota({ ipLimit: config.previewIpLimit, totalLimit: config.previewTotalLimit, now });
-  const baselineQuota = new DailyQuota({ ipLimit: config.baselineIpLimit, totalLimit: config.baselineTotalLimit, now });
-  const graftQuota = new DailyQuota({ ipLimit: config.graftInpaintIpLimit, totalLimit: config.graftInpaintTotalLimit, now });
-  const graftFillQuota = new DailyQuota({ ipLimit: config.graftFillIpLimit, totalLimit: config.graftFillTotalLimit, now });
+  const quota = new DailyQuota({ ...config, disabled: config.disableQuota, now });
+  const describeQuota = new DailyQuota({ ipLimit: config.describeIpLimit, totalLimit: config.describeTotalLimit, disabled: config.disableQuota, now });
+  const previewQuota = new DailyQuota({ ipLimit: config.previewIpLimit, totalLimit: config.previewTotalLimit, disabled: config.disableQuota, now });
+  const baselineQuota = new DailyQuota({ ipLimit: config.baselineIpLimit, totalLimit: config.baselineTotalLimit, disabled: config.disableQuota, now });
+  const graftQuota = new DailyQuota({ ipLimit: config.graftInpaintIpLimit, totalLimit: config.graftInpaintTotalLimit, disabled: config.disableQuota, now });
+  const graftFillQuota = new DailyQuota({ ipLimit: config.graftFillIpLimit, totalLimit: config.graftFillTotalLimit, disabled: config.disableQuota, now });
   /** sessionId:area:grafts:view → still payload (no durable disk). */
   const graftStillCache = new Map();
   const sessions = new Map();
@@ -186,6 +186,8 @@ export async function createApp({
     }
     const identity = parseOptionalDataImage(req.body?.identity, PREVIEW_MAX_BYTES);
     if (identity.status) return res.status(identity.status).json({ error: identity.error });
+    const angle = parseOptionalDataImage(req.body?.angle, PREVIEW_MAX_BYTES);
+    if (angle.status) return res.status(angle.status).json({ error: angle.error });
     const reservation = previewQuota.reserve(req.ip);
     if (reservation.status) return res.status(reservation.status).json({ error: reservation.error });
     const started = Date.now();
@@ -197,8 +199,10 @@ export async function createApp({
         reference: reference.buffer,
         referenceSpec: sanitized.spec,
         identity: identity.buffer || undefined,
+        angle: angle.buffer || undefined,
         mediaType: "image/jpeg",
         identityMediaType: identity.mediaType || "image/jpeg",
+        angleMediaType: angle.mediaType || "image/jpeg",
         timeoutMs: 90000,
         labDebug: req.body?.labDebug === true,
       });

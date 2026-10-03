@@ -1050,7 +1050,7 @@ export function createGraftFlow({
       <button type="button" id="graft-lab-save-strips">5장 저장</button>
       <div id="graft-lab-grid" class="ref-lab-candidates"></div>
     `;
-    $("stage").insertAdjacentElement("afterend", panel);
+    ($("lab-data-view") || $("stage").parentElement).append(panel);
     window.__graftTestMode = true;
     $("graft-lab-testmode").addEventListener("change", (e) => {
       window.__graftTestMode = e.target.checked;
