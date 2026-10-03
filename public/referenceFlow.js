@@ -91,7 +91,9 @@ export function createReferenceFlow({
   let hairDriftedLive = false;
   let reanchorCount = 0;
   let lastReanchorAt = 0;
+  let reanchorPending = false;
   let liveStartedAt = 0;
+  let headWasTurned = false;
   let labDebug = null;
 
   const selfie = createSelfieCapture({
@@ -372,7 +374,9 @@ export function createReferenceFlow({
     hairDriftedLive = false;
     reanchorCount = 0;
     lastReanchorAt = 0;
+    reanchorPending = false;
     liveStartedAt = 0;
+    headWasTurned = false;
     previewFailCount = 0;
     captureAspectRatio = "";
     identityDataUrl = "";
@@ -670,22 +674,44 @@ export function createReferenceFlow({
   /** How long Lucy is left to settle after connect / a re-push before another re-push. */
   const REANCHOR_SETTLE_MS = 2500;
   /** Minimum gap between style-image re-pushes (Lucy flashes if this is too frequent). */
-  const REANCHOR_GAP_MS = 4500;
+  const REANCHOR_GAP_MS = 3000;
+  /** Nose offset (eye-spans) that counts as a turn, and as back to front. */
+  const YAW_TURN = 0.18;
+  const YAW_FRONT = 0.08;
 
   /**
-   * Lucy v2v copies the camera hair again after a head turn. When the live hair looks like
-   * the person's own hair rather than the styled still, push the still + prompt again.
+   * Push the styled still again. A turn that arrives during the gap is remembered and sent
+   * on the next stats tick once the gap has passed.
    */
   function maybeReanchor(active, imageBlob, prompt) {
     if (!active || !imageBlob || active.stopped) return;
     const now = performance.now();
-    if (now - liveStartedAt < REANCHOR_SETTLE_MS) return;
-    if (now - lastReanchorAt < REANCHOR_GAP_MS) return;
+    if (now - liveStartedAt < REANCHOR_SETTLE_MS || now - lastReanchorAt < REANCHOR_GAP_MS) {
+      reanchorPending = true;
+      return;
+    }
+    reanchorPending = false;
     lastReanchorAt = now;
     reanchorCount += 1;
     void active.setHairReference(imageBlob, prompt).catch(() => {
       lastReanchorAt = 0;
+      reanchorPending = true;
     });
+  }
+
+  /** True on the tick the head crosses into a turn, or back to the front. */
+  function headTurnedEdge(yaw) {
+    if (!Number.isFinite(yaw)) return false;
+    const turned = Math.abs(yaw) >= YAW_TURN;
+    if (turned && !headWasTurned) {
+      headWasTurned = true;
+      return true;
+    }
+    if (headWasTurned && Math.abs(yaw) <= YAW_FRONT) {
+      headWasTurned = false;
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -768,8 +794,10 @@ export function createReferenceFlow({
                 && previewHairLength
                 && hairDrifted(stats.hair?.lucy, previewHairLength, stats.hair?.webcam),
               );
-              if (hairDriftedLive) maybeReanchor(active, lastLucyImage, lastLucyPrompt);
-              liveInfo.sync = `latency=${stats.latencyMs}ms lucy=${stats.lucyFps}fps composite=${stats.compositeFps}fps cam=${stats.webcamFps}fps misses=${stats.misses} dropped=${stats.dropped} [${stats.mode || "…"}] ${timing}${stats.lastError ? ` err=${stats.lastError}` : ""}${hairDriftedLive ? " drift" : ""}`;
+              if (hairDriftedLive || headTurnedEdge(stats.yaw) || reanchorPending) {
+                maybeReanchor(active, lastLucyImage, lastLucyPrompt);
+              }
+              liveInfo.sync = `latency=${stats.latencyMs}ms lucy=${stats.lucyFps}fps composite=${stats.compositeFps}fps cam=${stats.webcamFps}fps misses=${stats.misses} dropped=${stats.dropped} yaw=${Number(stats.yaw || 0).toFixed(2)} [${stats.mode || "…"}] ${timing}${stats.lastError ? ` err=${stats.lastError}` : ""}${hairDriftedLive ? " drift" : ""}`;
               updateLabDebug();
             },
           });
@@ -796,7 +824,9 @@ export function createReferenceFlow({
       lastLucyImage = useImage ? imageBlob : null;
       liveStartedAt = performance.now();
       lastReanchorAt = 0;
+      reanchorPending = false;
       reanchorCount = 0;
+      headWasTurned = false;
       hairDriftedLive = false;
       updateLabDebug({ prompt, enhance: lastLucyEnhance });
       await logPipelineTrace({ useImage, prompt, imageBlob });

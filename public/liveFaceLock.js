@@ -7,6 +7,7 @@ import {
   faceAnchorPoints,
   foreheadFade,
   hairLengthFromMask,
+  headYaw,
   maskFaceHair,
   maskScaleFor,
   polygonRegion,
@@ -472,7 +473,7 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
   let stopWebcam = () => {};
   let stopLucy = () => {};
   const stats = {
-    latencyMs: 0, lucyFps: 0, compositeFps: 0, webcamFps: 0, toneSamples: 0, misses: 0, dropped: 0, lastError: "", timing: {}, mode: "",
+    latencyMs: 0, lucyFps: 0, compositeFps: 0, webcamFps: 0, toneSamples: 0, misses: 0, dropped: 0, lastError: "", timing: {}, mode: "", yaw: 0,
     /** Hair length / area measures (hairLengthFromMask) of Lucy's frame and of the webcam, for drift checks. */
     hair: { lucy: null, webcam: null },
   };
@@ -687,6 +688,13 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
       canvas.height = lh;
     }
     const lucyAnchors = faces.length === 1 ? faceAnchorPoints(faces[0], lw, lh) : null;
+    if (faces.length === 1 && lucyAnchors) {
+      stats.yaw = headYaw(faces[0]);
+      try {
+        tools.lucyHair.request(lucySmall, lw, lh, now, lucyAnchors);
+        measureHair("lucy", tools.lucyHair, faces[0], now);
+      } catch { /* yaw still reported */ }
+    }
     pruneEntries(now);
     const match = lucyAnchors
       ? pickSyncedFrame(entries, lucyAnchors, expressionFeatures(faces[0]), now, latencyEstimate, MIN_LUCY_LATENCY_MS)
@@ -731,7 +739,6 @@ export function startLiveFaceLock({ sourceStream, styledVideo, canvas, mirror = 
     let hairRegion = null;
     try {
       // Non-blocking: queue a fresh mask when the worker is idle, use the latest one now.
-      tools.lucyHair.request(lucySmall, lw, lh, now, lucyAnchors);
       hairRegion = tools.lucyHair.regionMask(region, lucyAnchors, now, maskScaleFor(region.width * region.height));
     } catch {
       hairRegion = null;

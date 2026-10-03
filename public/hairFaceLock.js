@@ -1107,6 +1107,18 @@ export function hairLengthFromMask(mask, width, height, landmarks) {
  * drift when the live hair is far from the target and clearly closer to the person's own hair.
  * Reach is only compared when neither side is cut off by its frame; area always is.
  */
+/**
+ * Head turn, −1..1: nose vs the eye midpoint, in eye-spans. About ±0.2 is a clear left/right turn.
+ * Lucy v2v copies the camera hair again on a turn, so the live session re-sends the style then.
+ */
+export function headYaw(landmarks) {
+  if (!Array.isArray(landmarks) || landmarks.length < 468) return 0;
+  const span = landmarks[263].x - landmarks[33].x;
+  if (Math.abs(span) < 1e-4) return 0;
+  const mid = (landmarks[33].x + landmarks[263].x) / 2;
+  return (landmarks[1].x - mid) / span;
+}
+
 export function hairDrifted(live, target, own, { minDistance = 0.35, ownRatio = 0.6 } = {}) {
   if (!live || !target) return false;
   const distance = (a, b) => {

@@ -13,6 +13,7 @@ import {
   foreheadFade,
   hairDrifted,
   hairLengthFromMask,
+  headYaw,
   maskFaceHair,
   pointInPolygon,
   compositeLiveFace,
@@ -403,6 +404,17 @@ test("hairLengthFromMask reads the length category off the styled still", () => 
   assert.equal(read(230, { specks: 20 }).length, "shoulder");
   assert.equal(hairLengthFromMask(new Uint8Array(width * height), width, height, marks), null, "no hair → null");
   assert.equal(hairLengthFromMask(withHairDownTo(230), width, height, null), null);
+});
+
+test("headYaw is the nose offset from the eye line, in eye-spans", () => {
+  const straight = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
+  straight[33] = { x: 0.4, y: 0.4, z: 0 };
+  straight[263] = { x: 0.6, y: 0.4, z: 0 };
+  straight[1] = { x: 0.5, y: 0.5, z: 0 };
+  assert.ok(Math.abs(headYaw(straight)) < 1e-6);
+  straight[1] = { x: 0.56, y: 0.5, z: 0 };
+  assert.ok(Math.abs(headYaw(straight) - 0.3) < 1e-6);
+  assert.equal(headYaw(null), 0);
 });
 
 test("hairDrifted: bangs dropping back to the person's own hair is a drift", () => {
