@@ -31,6 +31,7 @@
     <div class="modes" role="group" aria-label="체험 종류">
       <button type="button" id="tab-reference" aria-pressed="true">헤어</button>
       <button type="button" id="tab-preset" aria-pressed="false">모수</button>
+      <button type="button" id="tab-plant" aria-pressed="false">모수2</button>
     </div>
 
     <!-- /lab 전용: 체험 화면과 LAB 데이터를 분리해서 본다 -->
@@ -64,6 +65,24 @@
       <div id="graft-baseline-banner" class="ref-stage-banner" hidden>
         <p id="graft-baseline-message">시술 전 이미지를 만들지 못했어요</p>
         <button type="button" id="graft-baseline-retry">다시 시도</button>
+      </div>
+
+      <!-- 모수2: 터치로 심기 (카메라 그림 + 심은 모발을 한 캔버스에 그린다) -->
+      <div id="plant-layer" class="ref-layer plant-layer" hidden>
+        <canvas id="plant-canvas" hidden></canvas>
+        <div id="plant-hud" class="plant-hud" hidden>
+          <strong id="plant-count">0 / 2,000모</strong>
+          <span class="plant-progress" aria-hidden="true"><span id="plant-progress-fill"></span></span>
+        </div>
+        <span id="plant-state" class="chip top-right" hidden>얼굴을 찾는 중</span>
+        <button type="button" id="plant-start" class="plant-start">카메라 켜기</button>
+        <p id="plant-hint" class="ref-overlay-text plant-hint" hidden></p>
+        <div id="plant-done" class="ref-stage-banner plant-done" hidden>
+          <p id="plant-done-message">2,000모를 모두 심었어요</p>
+          <div class="plant-done-actions">
+            <button type="button" id="plant-raise">목표 올리기</button>
+          </div>
+        </div>
       </div>
 
       <!-- 레퍼런스: 대기 -->
@@ -139,6 +158,17 @@
       <button type="button" id="connect">촬영 시작</button>
       <button type="button" id="disconnect" disabled>끊기</button>
     </div>
+
+    <!-- 모수2 하단: 목표 모수 · 시술 전 보기 · 다시 심기 -->
+    <div id="plant-bar" class="plant-bar" hidden>
+      <div id="plant-goals" class="plant-goals" role="group" aria-label="목표 모수"></div>
+      <div class="actions plant-actions">
+        <button type="button" id="plant-hold" class="plant-hold" aria-pressed="false" disabled>시술 전 (길게 누르기)</button>
+        <button type="button" id="plant-reset" disabled>다시 심기</button>
+        <button type="button" id="plant-stop" hidden>카메라 끄기</button>
+      </div>
+    </div>
+    <p id="plant-disclaimer" class="fine graft-disclaimer" hidden>참고용 시뮬레이션입니다. 터치 한 번에 100모가 심어지고 몇 초에 걸쳐 자라며, 실제 시술 결과와 다를 수 있습니다.</p>
 
     <p id="graft-disclaimer" class="fine graft-disclaimer" hidden>참고용 시뮬레이션이며 실제 시술 결과와 다를 수 있습니다.</p>
     <p id="status" role="status" hidden></p>

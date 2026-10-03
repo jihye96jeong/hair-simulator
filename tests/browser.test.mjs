@@ -801,3 +801,66 @@ test("browser: reference UI state screenshots", { timeout: 120000 }, async (t) =
     await expect(page.locator("#ref-live-bar")).toBeVisible({ timeout: 30000 });
   });
 });
+
+test("browser: 모수2 tab — camera on, taps before a face is found are refused, goal chips, camera off resets", { timeout: 120000 }, async (t) => {
+  const config = readConfig({ SIMULATOR_MODE: "ref", TOKEN_DAILY_IP_LIMIT: "20" });
+  const app = await createApp({
+    config,
+    logger: { error() {} },
+    decart: { tokens: { create: async () => ({ apiKey: "plant-token" }) } },
+    store: { saveLead: async () => ({ imageFileId: "x" }) },
+    hairVision: { describe: async () => ({ ok: true, spec: describeSpec }) },
+    hairEditor: { edit: async () => ({ buffer: Buffer.alloc(0), mediaType: "image/jpeg" }) },
+  });
+  const server = await new Promise((resolve, reject) => {
+    const s = app.listen(0, "127.0.0.1", (error) => error ? reject(error) : resolve(s));
+    s.on("error", reject);
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  config.origin = base;
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const browser = await launch();
+  t.after(() => browser.close());
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["camera"] });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(`${base}/`);
+
+  await page.locator("#tab-plant").click();
+  assert.equal(await page.locator("#tab-plant").getAttribute("aria-pressed"), "true");
+  await expect(page.locator("#plant-layer")).toBeVisible();
+  await expect(page.locator("#plant-start")).toBeVisible();
+  await expect(page.locator("#plant-bar")).toBeVisible();
+  // Lucy / Gemini controls of the other tabs stay out of the way.
+  assert.equal(await page.locator("#ref-bottom").isVisible(), false);
+  assert.equal(await page.locator("#preset-actions").isVisible(), false);
+  assert.equal(await page.locator("#plant-goals button").count(), 3);
+  assert.equal(await page.locator("#plant-goals button[aria-pressed='true']").textContent(), "2,000모");
+  await page.locator("#plant-goals button", { hasText: "3,000모" }).click();
+  await expect(page.locator("#plant-count")).toHaveText("0 / 3,000모");
+
+  await page.locator("#plant-start").click();
+  await expect(page.locator("#plant-canvas")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#plant-hud")).toBeVisible();
+  await expect(page.locator("#plant-stop")).toBeVisible();
+  // The fake camera shows no face: a tap must not plant anything and must say so.
+  await page.waitForTimeout(1500);
+  const box = await page.locator("#plant-canvas").boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height * 0.3);
+  await expect(page.locator("#plant-hint")).toContainText("얼굴");
+  await expect(page.locator("#plant-count")).toHaveText("0 / 3,000모");
+  const stats = await page.evaluate(() => globalThis.__graftPlay.stats);
+  assert.equal(stats.planted, 0);
+  assert.equal(stats.tracking, false);
+  assert.ok(stats.picture, "picture size known");
+
+  await page.locator("#plant-stop").click();
+  await expect(page.locator("#plant-start")).toBeVisible();
+  assert.equal(await page.locator("#plant-canvas").isVisible(), false);
+  // Back to the hair tab hides everything of 모수2.
+  await page.locator("#tab-reference").click();
+  assert.equal(await page.locator("#plant-layer").isVisible(), false);
+  assert.equal(await page.locator("#plant-bar").isVisible(), false);
+  assert.deepEqual(errors, []);
+});

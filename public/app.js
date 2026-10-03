@@ -2,6 +2,7 @@ import { REGIONS, validPhone, normalizePhone } from "./shared.js";
 import { chipLabel, ruleFor } from "./graftRules.js";
 import { createReferenceFlow } from "./referenceFlow.js";
 import { createGraftFlow } from "./graftFlow.js";
+import { createGraftPlayFlow } from "./graftPlayFlow.js";
 import { captureFrame, downloadCapture } from "./capture.js";
 
 const $ = (id) => document.getElementById(id);
@@ -120,11 +121,19 @@ const graftFlow = createGraftFlow({
   isLab: lab,
 });
 
+const graftPlayFlow = createGraftPlayFlow({
+  isActive: () => activeTab === "plant",
+  onGlobalError: (message) => error(message),
+});
+
+const TABS = ["reference", "preset", "plant"];
+
 function updateButtons() {
   if (activeTab === "preset") {
     graftFlow.updateButtons();
     return;
   }
+  if (activeTab === "plant") return;
   referenceFlow.updateButtons();
 }
 
@@ -135,13 +144,14 @@ function selectTab(next) {
     clearSharedStage();
     showOverlay("contact", false);
     showOverlay("complete", false);
+  } else if (activeTab === "plant") {
+    graftPlayFlow.deactivate();
   } else {
     referenceFlow.dispose();
   }
   activeTab = next;
   error("");
-  $("tab-reference").setAttribute("aria-pressed", String(next === "reference"));
-  $("tab-preset").setAttribute("aria-pressed", String(next === "preset"));
+  for (const tab of TABS) $(`tab-${tab}`).setAttribute("aria-pressed", String(next === tab));
   document.documentElement.classList.toggle("tab-reference", next === "reference");
   $("ref-bottom").hidden = next !== "reference";
   $("panel-preset").hidden = next !== "preset";
@@ -149,6 +159,11 @@ function selectTab(next) {
   if (next === "reference") {
     graftFlow.deactivate();
     referenceFlow.activate();
+  } else if (next === "plant") {
+    referenceFlow.dispose?.();
+    graftFlow.deactivate();
+    clearSharedStage();
+    graftPlayFlow.activate();
   } else {
     referenceFlow.dispose?.();
     clearSharedStage();
@@ -278,6 +293,7 @@ $("output").addEventListener("click", () => $("output").play().catch(() => {}));
 
 $("tab-reference").addEventListener("click", () => selectTab("reference"));
 $("tab-preset").addEventListener("click", () => selectTab("preset"));
+$("tab-plant").addEventListener("click", () => selectTab("plant"));
 
 /** /lab only: "체험 화면" shows the normal UI, "LAB 데이터" shows only the debug panels. */
 function selectLabView(view) {
@@ -295,10 +311,10 @@ if (lab) {
 document.querySelector(".modes").addEventListener("keydown", (event) => {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
   event.preventDefault();
-  const order = ["reference", "preset"];
+  const order = TABS;
   const index = order.indexOf(activeTab);
-  const next = event.key === "Home" ? "reference"
-    : event.key === "End" ? "preset"
+  const next = event.key === "Home" ? order[0]
+    : event.key === "End" ? order[order.length - 1]
       : order[(index + (event.key === "ArrowRight" ? 1 : -1) + order.length) % order.length];
   selectTab(next);
   $(`tab-${next}`).focus();
@@ -307,10 +323,12 @@ document.querySelector(".modes").addEventListener("keydown", (event) => {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) return;
   if (activeTab === "reference") referenceFlow.handleHidden();
+  else if (activeTab === "plant") graftPlayFlow.stop();
   else graftFlow.stopLive("hidden");
 });
 window.addEventListener("pagehide", () => {
   if (activeTab === "reference") referenceFlow.handlePageHide();
+  else if (activeTab === "plant") graftPlayFlow.stop();
   else {
     graftFlow.stopLive("pagehide");
     if (!submitting) discardCapture();
@@ -319,6 +337,7 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("pageshow", (event) => {
   if (!event.persisted) return;
   if (activeTab === "reference") referenceFlow.dispose();
+  else if (activeTab === "plant") graftPlayFlow.stop();
   else graftFlow.deactivate();
 });
 

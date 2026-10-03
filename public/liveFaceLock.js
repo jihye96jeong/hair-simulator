@@ -212,7 +212,7 @@ function unflattenLandmarks(flat) {
  * `detect(small, ts)` resolves with the landmark lists (0 or 1 face). `busy` means a frame is
  * still being processed; callers drop frames instead of queueing them.
  */
-async function createFaceDetectorAsync() {
+export async function createFaceDetectorAsync() {
   const client = createVisionWorkerClient("face");
   if (await client.ready) {
     return {
@@ -330,7 +330,7 @@ function createHairMaskProvider() {
   };
 }
 
-function onVideoFrame(video, callback) {
+export function onVideoFrame(video, callback) {
   let handle = 0;
   let stopped = false;
   const useRvfc = typeof video.requestVideoFrameCallback === "function";
