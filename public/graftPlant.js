@@ -30,11 +30,23 @@ export const PATCH_SPILL = 0.35;
 export const HAIRS_PER_GRAFT_WEIGHTS = Object.freeze([0.25, 0.5, 0.25]);
 /** Time for a planted unit to reach full length on screen. */
 export const GROW_MS = 6000;
-export const STRAND_LEN_CM = Object.freeze({ min: 0.9, max: 1.6 });
-/** Drawn strand width in cm (real hair is ~0.007 cm; drawn thicker so it reads at webcam scale). */
-export const STRAND_WIDTH_CM = 0.04;
-/** Never thinner than this on screen: anti-aliased hairlines fade to grey below it. */
-export const STRAND_MIN_PX = 1.3;
+export const STRAND_LEN_CM = Object.freeze({ min: 0.7, max: 1.6 });
+/** Real hair shaft width (cm). Strands are drawn near this: individual hairs are sub-pixel on a webcam. */
+export const HAIR_WIDTH_CM = 0.007;
+/** Drawn strand width in cm (slightly above the real shaft so coverage accumulates). */
+export const STRAND_WIDTH_CM = 0.016;
+/** Never thinner than this on screen. */
+export const STRAND_MIN_PX = 0.7;
+/** Strand opacity; hundreds of translucent strands build the texture, no single stroke reads. */
+export const STRAND_ALPHA = 0.7;
+/**
+ * The scalp under hair reads darker than the strands that can be resolved: a soft density
+ * shadow per patch, with coverage ≈ 1 − exp(−density · hairs · width · length · gain).
+ */
+export const SHADOW_GAIN = 1.3;
+export const SHADOW_FEATHER = 1.35;
+/** Hair layer blur (picture px) so strokes match the camera's softness. */
+export const HAIR_BLUR_PX = 0.6;
 export const SHADE_COUNT = 5;
 /** Outer eye-corner span of an adult, used when the irises are not measurable. */
 export const EYE_SPAN_CM = 9;
@@ -237,7 +249,7 @@ export function patchRadius({ center, existing, pxPerCm, count = GRAFTS_PER_TAP 
 /**
  * Plan one tap: `count` units around `center` (reference-frame px). Strands are grouped by
  * shade so the renderer strokes one path per colour:
- *   { x, y, radius, count, bornAt, centers: Float32Array(count*2),
+ *   { x, y, radius, count, bornAt, centers: Float32Array(count*2), shadow: 0..1 coverage,
  *     shades: Float32Array[SHADE_COUNT] of [x, y, dx, dy, len, bend]… }
  */
 export function planPatch({ center, frame, pxPerCm, existing = new Float32Array(0), rng = Math.random, count = GRAFTS_PER_TAP, bornAt = 0 }) {
@@ -266,6 +278,10 @@ export function planPatch({ center, frame, pxPerCm, existing = new Float32Array(
       buckets[shade].push(sx, sy, dir.x, dir.y, len, bend);
     }
   }
+  const areaCm2 = Math.PI * (radius / pxPerCm) ** 2;
+  const density = count / areaCm2;
+  const meanLen = (STRAND_LEN_CM.min + STRAND_LEN_CM.max) / 2;
+  const shadow = 1 - Math.exp(-density * 2 * HAIR_WIDTH_CM * meanLen * SHADOW_GAIN);
   return {
     x: center.x,
     y: center.y,
@@ -273,6 +289,7 @@ export function planPatch({ center, frame, pxPerCm, existing = new Float32Array(
     count,
     bornAt,
     centers,
+    shadow,
     shades: buckets.map((b) => Float32Array.from(b)),
   };
 }
@@ -314,18 +331,25 @@ export function sampleHairColor(rgba, width, height, points) {
 }
 
 /**
- * SHADE_COUNT CSS colours spread around the sampled hair colour (darkest first), biased dark:
- * thin anti-aliased strokes already read lighter than their colour.
+ * SHADE_COUNT CSS colours spread around the sampled hair colour (darkest first). The layer is
+ * multiplied onto the picture, so these are reflectances: lifted a little above the sampled
+ * (already lit) colour so hair over skin lands on the sampled tone instead of below it.
  */
 export function shadeColors(stats, count = SHADE_COUNT) {
   const out = [];
   const mid = (count - 1) / 2;
   for (let i = 0; i < count; i++) {
-    const k = ((i - mid) / Math.max(1, mid)) * 1.1 - 0.6;
-    const c = stats.mean.map((m, ch) => Math.max(0, Math.min(255, Math.round(m + k * stats.std[ch]))));
+    const k = ((i - mid) / Math.max(1, mid)) * 1.2;
+    const c = stats.mean.map((m, ch) => Math.max(0, Math.min(255, Math.round(m * 1.25 + 12 + k * stats.std[ch]))));
     out.push(`rgb(${c[0]},${c[1]},${c[2]})`);
   }
   return out;
+}
+
+/** Colour of the scalp shadow under the hair (slightly above the darkest strand reflectance). */
+export function shadowColor(stats) {
+  const c = stats.mean.map((m) => Math.max(0, Math.min(255, Math.round(m * 1.35 + 18))));
+  return c;
 }
 
 /**

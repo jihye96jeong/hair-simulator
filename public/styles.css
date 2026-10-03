@@ -936,18 +936,18 @@ html.tab-plant .stage { min-height: 0; }
   transform: translate(-50%, -50%);
 }
 .plant-pop {
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
   color: #f4f5f7;
-  text-shadow: 0 1px 6px #08090d;
+  text-shadow: 0 1px 4px #08090d;
   animation: plant-pop 900ms ease-out forwards;
 }
 .plant-ring {
-  width: 28px;
-  height: 28px;
-  border: 2px solid #ece7ff;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgb(236 231 255 / 70%);
   border-radius: 50%;
-  animation: plant-ring 600ms ease-out forwards;
+  animation: plant-ring 500ms ease-out forwards;
 }
 @keyframes plant-pop {
   0% { opacity: 0; transform: translate(-50%, -30%) scale(0.7); }

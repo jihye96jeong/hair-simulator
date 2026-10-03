@@ -16,6 +16,9 @@ import {
   DEFAULT_GOAL,
   GOALS,
   GRAFTS_PER_TAP,
+  HAIR_BLUR_PX,
+  SHADOW_FEATHER,
+  STRAND_ALPHA,
   STRAND_MIN_PX,
   STRAND_WIDTH_CM,
   affineFromPoints,
@@ -29,6 +32,7 @@ import {
   landmarkPixels,
   sampleHairColor,
   shadeColors,
+  shadowColor,
   trackPoints,
 } from "./graftPlant.js";
 
@@ -62,6 +66,9 @@ export function createGraftPlayFlow({ isActive = () => true, onGlobalError = () 
   const ctx = canvas.getContext("2d");
   const small = document.createElement("canvas");
   const smallCtx = small.getContext("2d");
+  const layer = document.createElement("canvas");
+  const layerCtx = layer.getContext("2d");
+  const canBlur = "filter" in ctx;
   const planting = createPlanting({ goal: DEFAULT_GOAL });
   const pool = [];
 
@@ -86,7 +93,9 @@ export function createGraftPlayFlow({ isActive = () => true, onGlobalError = () 
   let displayAffine = null;
   let displayT = 0;
   let lastFaceAt = -Infinity;
-  let shades = shadeColors({ mean: [38, 27, 21], std: [10, 8, 7] });
+  const DEFAULT_HAIR = { mean: [38, 27, 21], std: [10, 8, 7] };
+  let shades = shadeColors(DEFAULT_HAIR);
+  let shadowRgb = shadowColor(DEFAULT_HAIR);
   let showHair = true;
   let hintTimer = 0;
   const stats = { detectMs: 0, renderMs: 0, fps: 0, delayMs: 0, queue: 0 };
@@ -200,19 +209,50 @@ export function createGraftPlayFlow({ isActive = () => true, onGlobalError = () 
     return displayAffine;
   }
 
+  /**
+   * Hair is drawn into an offscreen layer — a soft density shadow per patch (the scalp under
+   * hair reads darker) plus hundreds of thin translucent strands — then multiplied onto the
+   * picture with a slight blur. Multiply keeps the camera's lighting on the hair and the blur
+   * matches the camera's softness, so strokes do not sit on top of the skin like ink.
+   */
   function drawHair(now, affine) {
     const since = now - lastFaceAt;
     const alpha = since < LOST_HOLD_MS ? 1 : Math.max(0, 1 - (since - LOST_HOLD_MS) / LOST_FADE_MS);
     if (!showHair || !affine || !ref || alpha <= 0 || !planting.patches.length) return;
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.setTransform(affine.a, affine.b, affine.c, affine.d, affine.e, affine.f);
-    ctx.lineCap = "round";
+    if (layer.width !== canvas.width || layer.height !== canvas.height) {
+      layer.width = canvas.width;
+      layer.height = canvas.height;
+    }
+    const l = layerCtx;
+    l.setTransform(1, 0, 0, 1, 0, 0);
+    l.clearRect(0, 0, layer.width, layer.height);
+    l.setTransform(affine.a, affine.b, affine.c, affine.d, affine.e, affine.f);
     const scale = affineScale(affine);
-    ctx.lineWidth = Math.max(STRAND_MIN_PX / scale, STRAND_WIDTH_CM * ref.frame.pxPerCm);
+
+    // 1. Density shadow: radial, feathered past the patch radius; grows in with the hair.
+    l.globalAlpha = 1;
+    for (const patch of planting.patches) {
+      const g = growth(now - patch.bornAt);
+      if (g <= 0.02) continue;
+      const a = patch.shadow * (0.25 + 0.75 * g);
+      const r = patch.radius * SHADOW_FEATHER;
+      const grad = l.createRadialGradient(patch.x, patch.y, 0, patch.x, patch.y, r);
+      grad.addColorStop(0, `rgba(${shadowRgb[0]},${shadowRgb[1]},${shadowRgb[2]},${a})`);
+      grad.addColorStop(0.55, `rgba(${shadowRgb[0]},${shadowRgb[1]},${shadowRgb[2]},${a * 0.8})`);
+      grad.addColorStop(1, `rgba(${shadowRgb[0]},${shadowRgb[1]},${shadowRgb[2]},0)`);
+      l.fillStyle = grad;
+      l.beginPath();
+      l.arc(patch.x, patch.y, r, 0, Math.PI * 2);
+      l.fill();
+    }
+
+    // 2. Strands: sub-pixel wide, translucent, grouped by shade.
+    l.lineCap = "round";
+    l.globalAlpha = STRAND_ALPHA;
+    l.lineWidth = Math.max(STRAND_MIN_PX / scale, STRAND_WIDTH_CM * ref.frame.pxPerCm);
     for (let s = 0; s < shades.length; s++) {
-      ctx.strokeStyle = shades[s];
-      ctx.beginPath();
+      l.strokeStyle = shades[s];
+      l.beginPath();
       let any = false;
       for (const patch of planting.patches) {
         const g = growth(now - patch.bornAt);
@@ -225,8 +265,8 @@ export function createGraftPlayFlow({ isActive = () => true, onGlobalError = () 
           const dy = arr[i + 3];
           const len = arr[i + 4] * g;
           const bend = arr[i + 5];
-          ctx.moveTo(x, y);
-          ctx.quadraticCurveTo(
+          l.moveTo(x, y);
+          l.quadraticCurveTo(
             x + dx * len * 0.5 - dy * bend * len,
             y + dy * len * 0.5 + dx * bend * len,
             x + dx * len,
@@ -235,8 +275,16 @@ export function createGraftPlayFlow({ isActive = () => true, onGlobalError = () 
           any = true;
         }
       }
-      if (any) ctx.stroke();
+      if (any) l.stroke();
     }
+
+    // 3. Composite: multiply keeps the picture's lighting; the blur matches the camera.
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = alpha;
+    ctx.globalCompositeOperation = "multiply";
+    if (canBlur) ctx.filter = `blur(${HAIR_BLUR_PX}px)`;
+    ctx.drawImage(layer, 0, 0);
     ctx.restore();
   }
 
@@ -298,7 +346,9 @@ export function createGraftPlayFlow({ isActive = () => true, onGlobalError = () 
       pushKeyframe({ t, affine: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 } });
       try {
         const rgba = frameCanvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, frameCanvas.width, frameCanvas.height).data;
-        shades = shadeColors(sampleHairColor(rgba, frameCanvas.width, frameCanvas.height, points));
+        const stats = sampleHairColor(rgba, frameCanvas.width, frameCanvas.height, points);
+        shades = shadeColors(stats);
+        shadowRgb = shadowColor(stats);
       } catch { /* keep default shades */ }
     } else {
       const next = affineFromPoints(ref.track, track);
@@ -456,7 +506,7 @@ export function createGraftPlayFlow({ isActive = () => true, onGlobalError = () 
     if (!pic) return;
     const patch = plantAtPicture(pic, now);
     if (!patch) return;
-    pop(event.clientX, event.clientY, `+${patch.count}`);
+    pop(event.clientX, event.clientY, `+${patch.count}모`);
     if (planting.planted === patch.count) setHint("심은 모발이 자라납니다. 계속 터치해서 늘려보세요");
     updateHud(now);
   }
